@@ -6,6 +6,7 @@ const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.ur
 const delegation = read("assets/orchestrator-delegation.md");
 const memory = read("assets/orchestrator-memory.md");
 const sddWorkflow = read("assets/sdd-orchestrator-workflow.md");
+const gentleInit = read("assets/agents/gentle-init.md");
 const sddInit = read("assets/agents/sdd-init.md");
 
 function containsAll(source: string, clauses: readonly string[]): void {
@@ -59,6 +60,25 @@ test("legacy policy is migration input only while the new authority is absent", 
 		"dispatch `gentle-init` before `sdd-init`",
 		"valid, active, and unchanged",
 	]);
+});
+
+test("gentle-init is the sole candidate author and inspector while the parent alone publishes", () => {
+	containsAll(sddWorkflow, [
+		"`gentle-init`, the sole candidate author and inspector",
+		"the parent is the sole publisher",
+	]);
+	assert.doesNotMatch(sddWorkflow, /`gentle-init`, the sole policy writer/i);
+	assert.doesNotMatch(sddWorkflow, /`gentle-init`(?:,)?\s+(?:is|as|the)\s+(?:sole\s+)?(?:policy\s+)?(?:writer|publisher)\b/i);
+});
+
+test("gentle-init proposes manual-row changes only from explicit parent requests without approval", () => {
+	containsAll(gentleInit, [
+		"unless an explicit parent request asks it to propose a change",
+		"Report every proposed manual-row change as a proposal, never as approval",
+		"Never receive or evaluate approval",
+	]);
+	assert.doesNotMatch(gentleInit, /exact relayed approval/i);
+	assert.doesNotMatch(gentleInit, /approval explicitly authorizes changing/i);
 });
 
 test("sdd-init is bootstrap-only and consumes parent-resolved policy", () => {

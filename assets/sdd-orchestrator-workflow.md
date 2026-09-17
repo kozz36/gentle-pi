@@ -113,7 +113,7 @@ When the store is `openspec` or `hybrid`, the compatible local policy projection
 openspec/config.yaml
 ```
 
-If it is missing after neutral policy resolution, do not ask `sdd-init` to invent it. Route the approved neutral-policy locator back through `gentle-init`, the sole policy writer, then run `/gentle-sdd-init` for bootstrap-only work when available.
+If it is missing after neutral policy resolution, do not ask `sdd-init` to invent it. Route the approved neutral-policy locator back through `gentle-init`, the sole candidate author and inspector; the parent is the sole publisher. Then run `/gentle-sdd-init` for bootstrap-only work when available.
 
 When the store is `engram` or `none`, `/gentle-sdd-init` never writes that file, so its absence is expected and is not missing bootstrap. For `engram`, consume the parent-resolved `gentle-init/{project}` locator, with read-only legacy fallback already resolved by the parent; for `none`, consume the approved inline status. Ask the user only when project context is genuinely absent.
 

@@ -31,7 +31,8 @@ Project files may provide an OpenSpec-compatible projection in `openspec/config.
 
 Build a neutral, complete candidate from the current approved policy, project evidence, and explicit parent request. The candidate must be usable by ODD and SDD without requiring either workflow.
 
-- Preserve every manual or unrecognized rubric row byte-for-byte and in its existing order unless the exact relayed approval explicitly authorizes changing it.
+- Preserve every manual or unrecognized rubric row byte-for-byte and in its existing order unless an explicit parent request asks it to propose a change.
+- Report every proposed manual-row change as a proposal, never as approval.
 - Keep detected tooling and runnable commands as evidence, never as activation consent.
 - Return the exact UTF-8 candidate bytes, intended destination and backend, source authority, source revision or preimage identity, preserved-row facts, and whether the candidate would activate, deactivate, or leave TDD unchanged.
 - Include enough evidence for the parent to materialize those exact bytes and independently compute and verify their identity. A missing, stale, truncated, or unverifiable candidate is blocking.
