@@ -30,6 +30,45 @@ ODD is the predefined workflow: it runs by default on every request, without the
 - **Checks:** functional checks run per task; a TODO checkbox never triggers a review cycle. The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch. After each work-unit commit, when RDD is enabled, assess it with `gentle_review` `{"operation":"assess"}` and `{"baseRef":"<last reviewed boundary>","committedOnly":true}`. Passive or low stays silent and the boundary advances. High, or an unavailable or failed assessment, reviews the commit itself right away at that base. Medium defers to the PR slice, the commits accumulated since the last reviewed boundary, bounded by the delivery budget of about 400 authored changed lines, and reviews at slice close. The first boundary is the branch point, and every reviewed boundary becomes the next base. Record the assessed tier and outcome per task: granted, declined, passive, deferred to slice, or unavailable. Existing risk, consent, and authority stay unchanged; never infer low risk from a failed assessment. Never skip an existing delivery gate.
 - **Delivery:** at feature-document creation, forecast authored changed lines (additions plus deletions, generated files excluded) from the task list, and keep a running count from work-unit commits. Choose one delivery strategy per feature: `ask-on-risk` (default), `auto-chain`, `single-pr`, or `exception-ok`. When the forecast or running count exceeds about 400 authored changed lines, apply the chosen strategy before the next commit. `ask-on-risk` asks once for the chain strategy (`stacked-to-main` or `feature-branch-chain`); `auto-chain` asks only for a missing chain strategy and slices automatically. Cache both choices, and record slice boundaries (which commits each PR holds) in the feature document. Resolve the `work-unit-commits` and `chained-pr` skills by registry name before planning or creating any PR.
 
+### Workflow-neutral TDD policy
+
+**Answer:** ODD and SDD consume one project policy. `gentle-init` is a read-only candidate author/inspector; the parent alone publishes exact approved bytes. Auto-dispatch remains an orchestrator contract, not a TypeScript policy controller or an ODD call to `sdd-init`.
+
+#### Routing and approval
+
+| Resolved state | Parent action |
+|---|---|
+| Valid, active, unchanged | Consume the policy directly; no `gentle-init` dispatch. |
+| Valid, inactive, unchanged | Preserve inactive mode; no dispatch. |
+| Absent, stale, unverifiable, or explicitly requested for update | Dispatch `gentle-init` to generate or refresh a complete candidate. |
+| New authority exists | Use it; do not read or compare the legacy migration input. |
+
+Test files, frameworks, and detected runners are evidence only and never activate TDD. The parent materializes `gentle-init`'s exact bytes to a non-authoritative preview, computes the checksum, binds approval to checksum+destination+source revision, publishes unchanged bytes, and reads them back. It never authors or transforms policy; any material correction requires a fresh dispatch and approval.
+
+The preferred approval presentation is a concise localized summary followed by a compact `work-type | MODE | key obligation` table. If table rendering fails, the parent says so and may present a verified reference to the complete candidate with its exact destination and SHA-256 checksum. Presentation failure alone does not block; an unavailable, stale, or unverifiable complete candidate does.
+
+#### Authority and compatibility
+
+| Surface | Rule |
+|---|---|
+| `gentle-init/{project}` | New Engram authority and destination for new writes. |
+| `sdd-init/{project}` | Read-only migration fallback, read only when the new authority is absent. |
+| Both Engram keys | The new authority wins; legacy is not read, compared, deleted, or updated automatically. |
+| `openspec/config.yaml` | Compatible file projection of the same approved policy, including existing `testing.rubric.active` usage. |
+
+`sdd-init` is bootstrap-only: it consumes the parent-resolved policy locator/status, does not launch a child, and does not generate or persist neutral policy. `/gentle-sdd-init` still runs SDD preflight and reports detected project capabilities, but it never derives `strict_tdd` from detected tests. It preserves an existing config byte-for-byte and tells the parent to route a missing projection through `gentle-init`; file existence itself is not proof of approval.
+
+#### Migration quick path
+
+1. Keep an existing `openspec/config.yaml`; it remains a compatible projection and is not rewritten merely because this agent exists.
+2. If only `sdd-init/{project}` exists, it remains readable as the fallback. The next approved creation/update writes the new `gentle-init/{project}` authority.
+3. Once the new key exists, use it without reading or comparing legacy; do not delete or update legacy automatically.
+4. Let the parent dispatch `gentle-init` for candidate changes, then publish only exact human-approved bytes; never infer activation from tests.
+
+Conceptual rollback removes the package agent, its delegation ownership and routing contracts, the neutral-policy documentation/tests, and the `sdd-init` compatibility changes. It does **not** delete or rewrite existing project policy, manual rubric rows, OpenSpec config, or user overrides.
+
+> **Evidence boundary:** static prompt-contract tests prove that these instructions are delivered. They do not prove autonomous model compliance; filesystem behavior such as preserving existing config requires executed runtime tests or observed Pi sessions.
+
 ```mermaid
 flowchart TD
     A[Request] --> B{Implementation authorized?}
@@ -96,6 +135,7 @@ This is guidance through existing tools, not a new CLI, phase, state engine, or 
 | **Lazy SDD preflight**         | Confirms SDD mode, artifact store, delivery strategy, and review budget on the first SDD invocation of every interactive session, including saved preferences; the parent transports the confirmed block to RPC SDD children.              |
 | **Subagent orchestration**     | Keeps one parent session responsible while child agents explore, implement, test, or review with focused context.                             |
 | **Strict TDD support**         | TDD mode, source, and runner come from configuration or explicit choice in ODD and SDD. Enabled TDD requires observed evidence; a test command alone does not enable it.                   |
+| **Neutral TDD policy**         | The delegation-owned `gentle-init` agent creates or refreshes one human-approved project policy consumed by both ODD and SDD. |
 | **Closed choice prompts** | Per-option hover/click/wheel in fullscreen; keyboard selection in either TUI mode. |
 | **Native pointer regions** | Compose hover, press, click, and wheel behavior around public TUI components. |
 | **Agent overlay close control** | Adds a header close button that adapts to available width. |
@@ -230,7 +270,7 @@ An orphan branch with commits and no parent has no branch point to name as `base
 /gentle:status          Check package, SDD assets, OpenSpec, and global model config.
 /gentle:doctor          Run read-only diagnostics for SDD assets, config, tools, and guards.
 /gentle:sdd-preflight   Run or reuse the session SDD preflight explicitly.
-/gentle-sdd-init           Create or refresh openspec/config.yaml (openspec/both stores only).
+/gentle-sdd-init           Inspect bootstrap readiness; preserve existing config and route missing policy through gentle-init.
 /gentle:models             Assign global model/effort routing to SDD/custom agents.
 /gentle:profiles           Create, switch, and manage global agent-model profiles.
 /gentle:persona            Switch between gentleman and neutral persona modes.
@@ -529,7 +569,7 @@ Engram-only mode is different by design: Engram is working memory and does not m
 ~/.pi/agent/gentle-ai/support/strict-tdd*.md
 ```
 
-Every new interactive session confirms preflight on its first SDD invocation. Saved preferences and canonical defaults are suggestions: confirm the grouped values or change them. Cancellation leaves preflight unresolved. The parent `subagent_run` boundary enforces this before every shipped SDD child and prepends the exact rendered `## SDD Session Preflight` block through its existing `context`; RPC children consume it and never originate or persist defaults. Missing or malformed transport blocks before spawn. Only a safely distinguishable standalone headless parent retains silent defaults. Session confirmation does not reset project initialization: the cold-start order remains confirmation → `sdd-init` → explore.
+Every new interactive session confirms preflight on its first SDD invocation. Saved preferences and canonical defaults are suggestions: confirm the grouped values or change them. Cancellation leaves preflight unresolved. The parent `subagent_run` boundary enforces this before every shipped SDD child and prepends the exact rendered `## SDD Session Preflight` block through its existing `context`; RPC children consume it and never originate or persist defaults. Missing or malformed transport blocks before spawn. Only a safely distinguishable standalone headless parent retains silent defaults. Session confirmation does not reset project initialization: the cold-start order is confirmation → neutral policy resolution/approval when required → bootstrap-only `sdd-init` → explore.
 
 Canonical values are `auto` execution mode, `openspec` artifact store, `ask-on-risk` delivery strategy, and a `400` changed-line review threshold. The delivery strategy domain is `ask-on-risk`, `auto-chain`, `single-pr`, or `exception-ok`; `chain_strategy` remains deferred until chaining is selected. `exception-ok` requires explicit `size:exception` acceptance and is never inferred. Consent, authorization, security, destructive/publishing, interactive phase approval, and ambiguous-scope gates remain human-controlled.
 
@@ -541,7 +581,7 @@ Startup refreshes only hash-proven delegation and review assets; existing SDD pa
 /gentle:install-sdd --force
 ```
 
-SDD preflight (including `/gentle-sdd-init`) installs missing SDD agents, chains, and support files and refreshes hash-proven managed SDD copies only. It preserves user edits and project overrides. Applying explicit saved model settings remains a separate, global concern at startup and preflight; the three installer commands do not apply model settings.
+SDD preflight (including `/gentle-sdd-init`) installs missing SDD agents, chains, and support files and refreshes hash-proven managed SDD copies only. It preserves user edits and project overrides. `/gentle-sdd-init` then inspects bootstrap readiness: an existing `openspec/config.yaml` is preserved, while a missing neutral policy projection is routed visibly to parent-owned `gentle-init` dispatch rather than generated from detected tests. Applying explicit saved model settings remains a separate, global concern at startup and preflight; the three installer commands do not apply model settings.
 
 ### Selected research
 
@@ -617,7 +657,7 @@ Skill discovery is a guardrail, not a workflow router: it helps Pi load the righ
 
 `gentle-pi` also ships package-owned `gentle-ai-skill-creator` and `gentle-ai-skill-improver` skills plus the `/skill-creation` prompt for creating or updating project skills. Both skills use `docs/skill-style-guide.md` as their normative style contract. The workflow checks for duplicates, keeps `SKILL.md` concise, uses one-line trigger-rich frontmatter, and reminds maintainers to refresh the registry after skill changes.
 
-Packaged skills include `cognitive-doc-design`, `comment-writer`, `gentle-ai-judgment-day`, `gentle-ai-skill-creator`, `gentle-ai-skill-improver`, and the other delivery/review skills under `skills/`. SDD init is installed as the packaged `sdd-init` runtime agent under `assets/agents/` and refreshed with the SDD assets.
+Packaged skills include `cognitive-doc-design`, `comment-writer`, `gentle-ai-judgment-day`, `gentle-ai-skill-creator`, `gentle-ai-skill-improver`, and the other delivery/review skills under `skills/`. The workflow-neutral `gentle-init` agent is installed with ordinary delegation assets; bootstrap-only `sdd-init` is refreshed on demand with SDD assets.
 
 Compatibility: the package keeps the existing skill folders (`skills/branch-pr`, `skills/cognitive-doc-design`, `skills/comment-writer`, `skills/judgment-day`, `skills/skill-creator`, `skills/skill-registry`, and `skills/work-unit-commits`) but their exported frontmatter names are prefixed to avoid collisions with user/global skills. Treat former package names such as `branch-pr`, `cognitive-doc-design`, `comment-writer`, `judgment-day`, `skill-creator`, `skill-registry`, and `work-unit-commits` as legacy aliases in prose; runtime skill selection should use `gentle-ai-branch-pr`, `gentle-ai-cognitive-doc-design`, `gentle-ai-comment-writer`, `gentle-ai-judgment-day`, `gentle-ai-skill-creator`, `gentle-ai-skill-registry`, and `gentle-ai-work-unit-commits`.
 
@@ -828,7 +868,7 @@ One limitation is worth stating. When a pinned profile omits an agent, that agen
 | `/gentle:toggle-rose`            | Toggles the startup rose.                                           |
 | `/gentle:toggle-text-logo`       | Toggles the startup text logo.                                      |
 | `/gentle:banner-color`           | Selects a startup banner color preset.                              |
-| `/gentle-sdd-init`               | Initializes or refreshes `openspec/config.yaml` (openspec/both stores only). |
+| `/gentle-sdd-init`               | Inspects bootstrap readiness, preserves existing config, and routes missing neutral policy through parent-owned `gentle-init` dispatch. |
 | `/gentle:install-delegation` | Installs missing global delegation agents only; `--force` refreshes managed copies. |
 | `/gentle:install-review`     | Installs missing global review agents and chains only; `--force` refreshes managed copies. |
 | `/gentle:install-sdd`         | Installs missing global SDD agents, chains, and support only, without overwriting files. |
@@ -938,14 +978,14 @@ To opt out:
 | `contracts/review-integration/v1/` | Byte-identical provider schemas and conformance fixtures for contract `review-integration/v1`, hash-checked before packaging; retained on disk permanently because `/v2`'s schemas `$ref` into these fragments. |
 | `contracts/review-integration/v2/` | Byte-identical provider schemas and conformance fixtures for contract `review-integration/v2` (immutable `base_tree`/`candidate_tree`, ordered `changed_path_manifest`, no inline candidate diff), hash-checked before packaging. |
 | `extensions/startup-banner.ts` | Shows and configures the startup intro, color presets, and compact runtime panel.     |
-| `extensions/sdd-init.ts`       | Registers `/gentle-sdd-init` for OpenSpec initialization.                                                         |
+| `extensions/sdd-init.ts`       | Registers bootstrap-readiness inspection for `/gentle-sdd-init`; it preserves existing policy and never derives activation from detected tests. |
 | `extensions/skill-registry.ts` | Maintains `.atl/skill-registry.md` from project/user skills and closes file watchers on shutdown.          |
 | `assets/orchestrator.md`       | Parent-session orchestration contract (always-on core).                                                    |
 | `assets/orchestrator-delegation.md` | Lazy-loaded delegation/routing/review detail, including the mirrored gentle-ai canon.                 |
 | `assets/orchestrator-memory.md` | Lazy-loaded ODD feature continuity plus SDD memory phase table, artifact keys, and lifecycle rule.                                    |
 | `assets/orchestrator-skills.md` | Lazy-loaded skill registry fallback semantics and intent-driven skill discovery.                          |
 | `assets/sdd-orchestrator-workflow.md` | Lazy-loaded SDD workflow surface for the parent orchestrator.                                       |
-| `assets/agents/`               | Delegation, review, and on-demand SDD agents installed as global Pi runtime assets.                                                          |
+| `assets/agents/`               | Delegation agents (including workflow-neutral `gentle-init`), review agents, and on-demand SDD agents installed as global Pi runtime assets. |
 | `assets/chains/`               | SDD chains installed as global Pi runtime assets.                                                          |
 | `assets/support/`              | Strict TDD support docs for apply/verify phases.                                                           |
 | `skills/`                      | Gentle AI delivery and collaboration skills.                                                               |

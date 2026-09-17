@@ -91,9 +91,32 @@ Return concise findings, recommendation, tradeoffs, open questions, and implemen
 
 Use at most one scoped independent read-only assumption challenge for a high-consequence unproven premise, even in a small security-critical change. Name the premise, evidence, and consequence; do not start a debate loop. Deterministic failures need fixes, not model debate. The native RDD refuter owns native review claims; never duplicate or bypass it with this challenge.
 
+#### Neutral project TDD policy routing
+
+ODD and SDD consume the same neutral policy authority. Before an implementation delegation needs a TDD mode, the parent resolves policy status with its available file and Engram tools using the authority rules in `orchestrator-memory.md`. Test files, frameworks, commands, and detected runners are evidence only; they never select or activate TDD.
+
+Use this state matrix:
+
+| Resolved policy state | Parent action |
+|---|---|
+| valid, active, unchanged | consume the policy without dispatching `gentle-init` |
+| valid, inactive, unchanged | consume inactive mode without dispatching `gentle-init` |
+| absent, stale, unverifiable, or explicitly requested for update | dispatch the package-owned `gentle-init` |
+| new authority present | use it without reading or comparing the legacy migration input |
+
+For ODD, never invoke `sdd-init` to resolve ODD TDD. For selected SDD, follow the Neutral Policy Gate in `sdd-orchestrator-workflow.md` before SDD bootstrap. Detection and dispatch may be automatic, but activation requires exact human approval relayed by the parent.
+
+`gentle-init` is the candidate author and inspector; the parent is the only policy publisher. The parent must not author, transform, or reconcile candidate bytes. When the agent returns complete candidate facts:
+
+1. The parent must materialize the exact UTF-8 candidate bytes to a non-authoritative preview or reference and compute SHA-256 itself. Preserve the agent's destination, backend, source revision/preimage identity, and manual-row facts.
+2. Prefer a concise localized summary followed by a compact `work-type | MODE | key obligation` table before asking for approval. Keep the complete candidate inspectable. If table rendering fails, explicitly say so; a verified complete-candidate reference, exact destination, and SHA-256 checksum is sufficient fallback. Block only when the candidate is unavailable, stale, or unverifiable.
+3. The parent must bind approval to the checksum, destination, and source revision. The human approves those exact bytes; neither parent nor agent may infer approval from detection or file presence.
+4. After approval, publish EXACT unchanged candidate bytes to the selected canonical backend with the parent's actual write or memory tool, then independently read back the destination and verify its bytes and checksum before claiming activation.
+5. Any material correction, update, changed preimage, or failed readback requires a fresh `gentle-init` dispatch and new approval. Never patch candidate bytes in the parent; manual-row reconciliation remains agent inspection work.
+
 #### Checks and candidate consent
 
-Resolve effective TDD on/off from existing project/session configuration or explicit user choice; retain its source and exact test runner. Record resolved mode, source, and runner in the feature document when present. Tests or frameworks being present does not enable TDD. Forward mode, source, and runner on every implementation delegation; refresh on resume. When enabled, require observed RED before implementation, GREEN, then REFACTOR; never invent evidence. When disabled, run ordinary functional checks, not no checks. If mode is unknown/conflicting or the runner is missing, disclose and resolve only the ambiguity affecting the next action; never invent precedence or a command, and never invoke sdd-init to determine ODD TDD.
+Resolve effective TDD on/off from existing project/session configuration or explicit user choice; retain its source and exact test runner. The resolved source must be the approved neutral project policy or an explicit current user choice. Record resolved mode, source, and runner in the feature document when present. Tests or frameworks being present does not enable TDD. Forward mode, source, and runner on every implementation delegation; refresh on resume. When enabled, require observed RED before implementation, GREEN, then REFACTOR; never invent evidence. When disabled, run ordinary functional checks, not no checks. If mode is unknown/conflicting or the runner is missing, disclose and resolve only the ambiguity affecting the next action; never invent precedence or a command, and never invoke sdd-init to determine ODD TDD.
 
 Run applicable functional checks per task; a TODO checkbox never triggers a review cycle. The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch, and native review runs at that work-unit commit or PR slice boundary, not every task update. Checklists grant no approval or receipt and never skip an existing delivery gate.
 

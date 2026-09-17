@@ -90,6 +90,7 @@ test("no-callback preflight fallback installs only SDD-owned assets", async () =
 		);
 		assert.equal(existsSync(join(agentHome, "agents", "sdd-apply.md")), true);
 		assert.equal(existsSync(join(agentHome, "agents", "gentle-ai-worker.md")), false);
+		assert.equal(existsSync(join(agentHome, "agents", "gentle-init.md")), false);
 		assert.equal(existsSync(join(agentHome, "agents", "review-risk.md")), false);
 	} finally {
 		if (previousAgentHome === undefined) delete process.env.GENTLE_PI_AGENT_HOME;

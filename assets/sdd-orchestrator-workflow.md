@@ -92,21 +92,32 @@ The package should ensure SDD assets are present as global Pi runtime assets wit
 
 Manual install commands are recovery/debug paths, not the happy path. `/gentle:sdd-preflight` is the explicit preflight command for agent/orchestrator use. If the user explicitly changes SDD preferences later in the same session, follow the new instruction.
 
+## Neutral Policy Gate
+
+Selected SDD consumes the same neutral policy authority as ODD. After session preflight and before `sdd-init` or any later SDD phase, resolve the project policy under `orchestrator-memory.md`'s authority order.
+
+- When policy is valid, active, and unchanged, consume it without launching `gentle-init`.
+- When policy is valid, inactive, and unchanged, preserve inactive mode without launching `gentle-init`; SDD selection does not activate TDD.
+- When policy is absent, stale, unverifiable, or explicitly requested for update, dispatch `gentle-init` before `sdd-init` and follow the parent interaction-relay contract in `orchestrator-delegation.md`.
+- When dual authorities diverge, block before bootstrap. Neither SDD nor freshness guesses choose a winner.
+
+Forward the parent-approved neutral policy locator and status to `sdd-init`. If `gentle-init` returns a revised candidate during correction or verification, any prior approval is invalid; the parent redisplays and obtains approval for the new material revision before continuing. Test presence and detected runners remain capability evidence only.
+
 ## Init Guard
 
-Before any SDD flow, make sure project context exists. Where that context lives depends on the session's artifact store, so qualify the check by store before acting on it.
+After the Neutral Policy Gate, make sure SDD bootstrap context exists. Where that context lives depends on the session's artifact store, so qualify the check by store before acting on it.
 
-When the store is `openspec` or `both`, the local artifact is:
+When the store is `openspec` or `hybrid`, the compatible local policy projection is:
 
 ```text
 openspec/config.yaml
 ```
 
-If it is missing, ask the user for the minimal information needed or run `/gentle-sdd-init` if available.
+If it is missing after neutral policy resolution, do not ask `sdd-init` to invent it. Route the approved neutral-policy locator back through `gentle-init`, the sole policy writer, then run `/gentle-sdd-init` for bootstrap-only work when available.
 
-When the store is `engram` or `none`, `/gentle-sdd-init` never writes that file, so its absence is expected and is not a missing init. Never re-trigger `/gentle-sdd-init` over it. Resolve project context from the Engram `sdd-init/{project}` topic for `engram`, or inline from the session for `none`, and ask the user only when that context is genuinely absent.
+When the store is `engram` or `none`, `/gentle-sdd-init` never writes that file, so its absence is expected and is not missing bootstrap. For `engram`, consume the parent-resolved `gentle-init/{project}` locator, with read-only legacy fallback already resolved by the parent; for `none`, consume the approved inline status. Ask the user only when project context is genuinely absent.
 
-This init guard runs after the session preflight gate above; project config presence or absence never substitutes for session preflight choices. Do not proceed with a substantial SDD flow while pretending project context, testing capability, or session preflight choices are known.
+This init guard runs after the session preflight and Neutral Policy gates above; project config presence or absence never substitutes for either. Do not proceed with a substantial SDD flow while pretending project context, testing capability, policy approval, or session preflight choices are known.
 
 ## Artifact Store Policy
 

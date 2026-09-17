@@ -1,9 +1,7 @@
 import {
 	existsSync,
-	mkdirSync,
 	readFileSync,
 	readdirSync,
-	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { applySavedModelConfig } from "./gentle-ai.ts";
@@ -65,17 +63,6 @@ interface Detection {
 		typecheck: CommandInfo[];
 		format: CommandInfo[];
 	};
-}
-
-function yamlString(value: string): string {
-	return JSON.stringify(value);
-}
-
-function escapeBlockScalar(value: string): string {
-	return value
-		.split("\n")
-		.map((line) => `  ${line}`)
-		.join("\n");
 }
 
 function readJson<T>(path: string): T | undefined {
@@ -653,142 +640,26 @@ function detectProject(cwd: string): Detection {
 	return detection;
 }
 
-function commandSummary(commands: CommandInfo[]): string {
-	if (commands.length === 0) return "none";
-	return commands
-		.map((command) => `${command.framework} (${command.command})`)
-		.join("; ");
-}
-
-function renderContext(detection: Detection): string {
-	const lines = [
-		`${detection.projectName} is a ${detection.stack.length > 0 ? detection.stack.join(", ") : "software"} project.`,
-		`Detected markers: ${detection.markers.length > 0 ? detection.markers.join(", ") : "none"}.`,
-	];
-	if (detection.packageManagers.length > 0)
-		lines.push(`Package managers: ${detection.packageManagers.join(", ")}.`);
-	if (detection.evidence.length > 0)
-		lines.push(`Additional evidence: ${detection.evidence.join("; ")}.`);
-	if (detection.testCommand)
-		lines.push(`Primary test command: ${detection.testCommand}.`);
-	else
-		lines.push(
-			"No reliable test runner was detected; verify testing manually before enabling strict TDD.",
-		);
-	lines.push(`Unit tests: ${commandSummary(detection.commands.unit)}.`);
-	lines.push(
-		`Integration tests: ${commandSummary(detection.commands.integration)}.`,
-	);
-	lines.push(`E2E tests: ${commandSummary(detection.commands.e2e)}.`);
-	return lines.join("\n");
-}
-
-function pushCommandList(
-	lines: string[],
-	indent: string,
-	commands: CommandInfo[],
-): void {
-	if (commands.length === 0) {
-		lines.push(`${indent}[]`);
-		return;
-	}
-	for (const command of commands) {
-		lines.push(`${indent}- scope: ${yamlString(command.scope)}`);
-		lines.push(`${indent}  command: ${yamlString(command.command)}`);
-		lines.push(`${indent}  framework: ${yamlString(command.framework)}`);
-	}
-}
-
-function renderConfig(detection: Detection): string {
-	const strictTdd = Boolean(detection.testCommand);
-	const testCommand = detection.testCommand ?? "";
-	const today = new Date().toISOString().slice(0, 10);
-	const context = renderContext(detection);
-	const unitLayer = detection.commands.unit
-		.map((command) => command.framework)
-		.join(", ");
-	const integrationLayer = detection.commands.integration
-		.map((command) => command.framework)
-		.join(", ");
-	const e2eLayer = detection.commands.e2e
-		.map((command) => command.framework)
-		.join(", ");
-	const lines = [
-		`strict_tdd: ${strictTdd}`,
-		"context: |",
-		escapeBlockScalar(context),
-		"rules:",
-		"  proposal:",
-		"    require_problem_statement: true",
-		"  spec:",
-		"    require_acceptance_criteria: true",
-		"  design:",
-		"    require_tradeoffs: true",
-		"  tasks:",
-		"    protect_review_workload: true",
-		"  apply:",
-		`    test_command: ${yamlString(testCommand)}`,
-		"  verify:",
-		`    test_command: ${yamlString(testCommand)}`,
-		"testing:",
-		`  detected: ${yamlString(today)}`,
-		"  runner:",
-		`    command: ${yamlString(testCommand)}`,
-		`    framework: ${yamlString(detection.testFramework ?? "")}`,
-		"  layers:",
-		`    unit: ${yamlString(unitLayer)}`,
-		`    integration: ${yamlString(integrationLayer)}`,
-		`    e2e: ${yamlString(e2eLayer)}`,
-		"  commands:",
-		"    unit:",
-	];
-	pushCommandList(lines, "      ", detection.commands.unit);
-	lines.push("    integration:");
-	pushCommandList(lines, "      ", detection.commands.integration);
-	lines.push("    e2e:");
-	pushCommandList(lines, "      ", detection.commands.e2e);
-	lines.push("  coverage:");
-	lines.push(`    command: ${yamlString(detection.coverageCommand ?? "")}`);
-	lines.push("    commands:");
-	pushCommandList(lines, "      ", detection.commands.coverage);
-	lines.push("quality:");
-	lines.push(`  lint: ${yamlString(detection.lintCommand ?? "")}`);
-	lines.push("  lint_commands:");
-	pushCommandList(lines, "    ", detection.commands.lint);
-	lines.push(`  typecheck: ${yamlString(detection.typecheckCommand ?? "")}`);
-	lines.push("  typecheck_commands:");
-	pushCommandList(lines, "    ", detection.commands.typecheck);
-	lines.push(`  format: ${yamlString(detection.formatCommand ?? "")}`);
-	lines.push("  format_commands:");
-	pushCommandList(lines, "    ", detection.commands.format);
-	lines.push("");
-	return lines.join("\n");
-}
-
-function ensureOpenSpecDirs(cwd: string): void {
-	mkdirSync(join(cwd, "openspec", "specs"), { recursive: true });
-	mkdirSync(join(cwd, "openspec", "changes", "archive"), { recursive: true });
-}
-
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("gentle-sdd-init", {
 		description:
-			"Auto-detect project stack and bootstrap openspec/config.yaml for SDD.",
+			"Inspect SDD bootstrap readiness without creating or activating project TDD policy.",
 		handler: async (_args: unknown, ctx: any) => {
 			const prefs = await ensureSddPreflight(ctx, { pi, installAssets: (cwd) => installPackageAssets(cwd, true, ["sdd"]), applyModelConfig: () => applySavedModelConfig(ctx) }, { promptFields: [] });
 
 			const detection = detectProject(ctx.cwd);
-			const testSummary = detection.testCommand
-				? `strict TDD enabled with \`${detection.testCommand}\``
-				: "strict TDD disabled because no test runner was detected";
 			const layerSummary = `unit: ${detection.commands.unit.length}, integration: ${detection.commands.integration.length}, e2e: ${detection.commands.e2e.length}`;
+			const capabilitySummary = detection.testCommand
+				? `detected runner evidence: \`${detection.testCommand}\``
+				: "no reliable runner evidence detected";
+			const projectSummary = `detected ${detection.stack.join(", ") || "project"}; ${capabilitySummary}; test layers: ${layerSummary}`;
 
-			const shouldCreateOpenSpec =
+			const usesOpenSpec =
 				prefs.artifactStore === "openspec" ||
 				prefs.artifactStore === "hybrid";
-			if (!shouldCreateOpenSpec) {
+			if (!usesOpenSpec) {
 				ctx.ui.notify(
-					`SDD initialized for ${prefs.artifactStore}: detected ${detection.stack.join(", ") || "project"}; ${testSummary}; tests found: ${layerSummary}.`,
+					`SDD bootstrap inspected for ${prefs.artifactStore}: ${projectSummary}. Consume the parent-approved neutral policy locator; detection does not activate TDD and no policy was written.`,
 					"info",
 				);
 				return;
@@ -797,19 +668,15 @@ export default function (pi: ExtensionAPI) {
 			const configPath = join(ctx.cwd, CONFIG_REL_PATH);
 			if (existsSync(configPath)) {
 				ctx.ui.notify(
-					`${CONFIG_REL_PATH} already exists. Edit it manually or remove it before re-running /gentle-sdd-init.`,
-					"warning",
+					`Preserved existing neutral policy projection at ${CONFIG_REL_PATH}; approval must be verified by parent. ${projectSummary}. /gentle-sdd-init does not alter policy bytes.`,
+					"info",
 				);
 				return;
 			}
 
-			ensureOpenSpecDirs(ctx.cwd);
-			mkdirSync(dirname(configPath), { recursive: true });
-			writeFileSync(configPath, renderConfig(detection));
-
 			ctx.ui.notify(
-				`Wrote ${CONFIG_REL_PATH}: detected ${detection.stack.join(", ") || "project"}; ${testSummary}; tests found: ${layerSummary}.`,
-				"info",
+				`No approved neutral policy projection exists at ${CONFIG_REL_PATH}; ${projectSummary}. Parent must resolve policy and dispatch gentle-init for exact approval before SDD bootstrap. No policy was written.`,
+				"warning",
 			);
 		},
 	});

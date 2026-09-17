@@ -204,6 +204,17 @@ test("ODD forwards configured TDD without equating test presence with enablement
 	assert.doesNotMatch(wrapper, /If tests exist, use strict TDD/);
 });
 
+test("ODD resolves neutral policy without routing through SDD init", () => {
+	containsAll(delegation, [
+		"valid, active, unchanged",
+		"consume the policy without dispatching `gentle-init`",
+		"absent, stale, unverifiable, or explicitly requested for update",
+		"dispatch the package-owned `gentle-init`",
+		"never invoke `sdd-init` to resolve ODD TDD",
+		"activation requires exact human approval relayed by the parent",
+	]);
+});
+
 test("ODD protocol is always-on in the rendered system prompt and runs by default", () => {
 	const orderedClauses = [
 		"Default workflow: Organic Driven Development (MANDATORY)",

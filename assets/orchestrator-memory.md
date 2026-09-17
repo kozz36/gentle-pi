@@ -16,9 +16,19 @@ Before implementation or resume, the parent reads both the actual file and full 
 
 The existing `todo` tool is the required session/UI projection for substantial ODD, not a third authority. After reconciling and writing the durable file and Engram copy, create or rebuild the visible `todo` list from the same feature tasks before the first source write; after every task transition and material plan change, update both durable copies and the visible projection in the same turn; its replay or completed-list clearing must not delete or replace the durable file or Engram copy. If the projection is unavailable, record that limitation without pretending it is synchronized. Small/read-only work does not acquire an ODD artifact or todo list merely because the UI can display tasks.
 
+### Neutral project policy authority
+
+Project TDD policy is shared by ODD and SDD; it is not an SDD phase artifact. For Engram, read the new authority first at `gentle-init/{project}`. Only when the new authority is absent, read `sdd-init/{project}` as read-only migration input. Once the new authority exists, use it and do not read or compare the legacy key. Do not delete or update the legacy observation automatically.
+
+For file-backed projects, `openspec/config.yaml` remains a compatible projection of the same approved neutral policy, not a second policy engine. Divergence between a file projection and the resolved new authority is stale policy and requires a fresh `gentle-init` candidate and approval rather than inferred reconciliation.
+
+A parent-resolved policy status must retain authority, locator, source revision/preimage identity, checksum, activation mode, and exact runner when configured. Pass that locator and status to both ODD workers and the SDD init bootstrap.
+
 ### SDD phases
 
 Except for output-only `sdd-research`, each SDD phase subagent reads its own required inputs directly from the active backend; the parent passes artifact references (topic keys or file paths), NOT the content itself. Phase subagents persist their artifact before returning.
+
+Bootstrap-only `sdd-init` consumes the parent-resolved neutral policy locator/status and returns bootstrap facts without owning a policy artifact.
 
 | Phase          | Reads                                                   | Writes           |
 | -------------- | ------------------------------------------------------- | ---------------- |

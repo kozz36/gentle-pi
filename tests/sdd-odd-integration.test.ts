@@ -19,6 +19,17 @@ test("integrated organic continuity and selected SDD keep separate persistence o
 	assert.match(read("assets/sdd-orchestrator-workflow.md"), /Optional research takes precedence/);
 });
 
+test("ODD and SDD consume one neutral policy authority", () => {
+	const delegation = read("assets/orchestrator-delegation.md");
+	const workflow = read("assets/sdd-orchestrator-workflow.md");
+	const memory = read("assets/orchestrator-memory.md");
+	assert.match(delegation, /same neutral policy authority/i);
+	assert.match(workflow, /same neutral policy authority as ODD/i);
+	assert.match(memory, /gentle-init\/\{project\}/);
+	assert.match(workflow, /dispatch `gentle-init` before `sdd-init`/);
+	assert.match(delegation, /never invoke `sdd-init` to resolve ODD TDD/);
+});
+
 test("integrated TDD guidance preserves native SDD completion without retired consumers", () => {
 	const wrapper = read("extensions/gentle-ai.ts"), tasks = read("assets/agents/sdd-tasks.md");
 	assert.match(wrapper, /Use configured TDD mode, source, and exact runner/);

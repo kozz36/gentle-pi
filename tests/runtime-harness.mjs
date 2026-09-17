@@ -1535,19 +1535,19 @@ async function run() {
 			/Wrote openspec\/config\.yaml/,
 			"/gentle-sdd-init must not announce openspec/config.yaml when artifactStore is engram",
 		);
-		assert.match(
-			ctx.ui.notifications.at(-1).message,
-			/SDD initialized for engram:/,
-		);
+		assert.match(ctx.ui.notifications.at(-1).message, /^SDD bootstrap inspected for engram:/);
+		assert.match(ctx.ui.notifications.at(-1).message, /Consume the parent-approved neutral policy locator/);
+		assert.match(ctx.ui.notifications.at(-1).message, /detection does not activate TDD and no policy was written/);
+		assert.doesNotMatch(ctx.ui.notifications.at(-1).message, /SDD initialized/);
 		assert.equal(ctx.ui.notifications.at(-1).level, "info");
 	} finally {
 		pi.setActiveTools(["read", "bash", "edit", "write"]);
 		await rm(engramSddInitCwd, { recursive: true, force: true });
 	}
 
-	// Issue #64 counterpart: the engram skip must stay narrow. Selecting both
-	// still has to create the full openspec/ scaffold and write config.yaml,
-	// so an over-broad skip is caught here instead of in the field.
+	// Issue #64 counterpart: hybrid still selects OpenSpec as an artifact
+	// backend, but missing neutral policy must route to gentle-init rather than
+	// create a scaffold or infer policy from detected capabilities.
 	const bothSddInitCwd = await tempWorkspace();
 	try {
 		pi.setActiveTools(["read", "bash", "edit", "write", "mem_save"]);
@@ -1558,27 +1558,14 @@ async function run() {
 		};
 		await commands.get("gentle:sdd-preflight").handler("--edit", ctx);
 		await commands.get("gentle-sdd-init").handler("", ctx);
-		assert.equal(
-			existsSync(join(bothSddInitCwd, "openspec", "specs")),
-			true,
-			"/gentle-sdd-init must create openspec/specs when artifactStore is both",
-		);
-		assert.equal(
-			existsSync(join(bothSddInitCwd, "openspec", "changes", "archive")),
-			true,
-			"/gentle-sdd-init must create openspec/changes/archive when artifactStore is both",
-		);
-		assert.equal(
-			existsSync(join(bothSddInitCwd, "openspec", "config.yaml")),
-			true,
-			"/gentle-sdd-init must write openspec/config.yaml when artifactStore is both",
-		);
-		assert.match(
-			ctx.ui.notifications.at(-1).message,
-			/Wrote openspec\/config\.yaml/,
-			"/gentle-sdd-init must announce openspec/config.yaml when artifactStore is both",
-		);
-		assert.equal(ctx.ui.notifications.at(-1).level, "info");
+		assert.equal(existsSync(join(bothSddInitCwd, "openspec", "specs")), false);
+		assert.equal(existsSync(join(bothSddInitCwd, "openspec", "changes", "archive")), false);
+		assert.equal(existsSync(join(bothSddInitCwd, "openspec", "config.yaml")), false);
+		assert.match(ctx.ui.notifications.at(-1).message, /No approved neutral policy projection exists/);
+		assert.match(ctx.ui.notifications.at(-1).message, /Parent must resolve policy and dispatch gentle-init for exact approval/);
+		assert.match(ctx.ui.notifications.at(-1).message, /No policy was written/);
+		assert.doesNotMatch(ctx.ui.notifications.at(-1).message, /Wrote openspec\/config\.yaml|SDD initialized/);
+		assert.equal(ctx.ui.notifications.at(-1).level, "warning");
 	} finally {
 		pi.setActiveTools(["read", "bash", "edit", "write"]);
 		await rm(bothSddInitCwd, { recursive: true, force: true });
@@ -1828,17 +1815,20 @@ async function run() {
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-sync.md")), false);
 		assert.equal(existsSync(join(globalAgentHome, "gentle-ai", "support", "sdd-status-contract.md")), true);
 		assert.equal(existsSync(join(globalAgentHome, "chains", "sdd-full.chain.md")), true);
-		assert.equal(ctx.ui.selections.length, 1, "sdd-init confirms session preflight before project initialization");
+		assert.equal(ctx.ui.selections.length, 1, "sdd-init confirms session preflight before bootstrap inspection");
 		assert.match(ctx.ui.notifications[1].message, /SDD preflight complete/);
-		assert.match(ctx.ui.notifications.at(-1).message, /Wrote openspec\/config\.yaml/);
-		const initializedConfig = await readFile(join(sddCwd, "openspec", "config.yaml"), "utf8");
+		assert.equal(existsSync(join(sddCwd, "openspec", "config.yaml")), false);
+		assert.match(ctx.ui.notifications.at(-1).message, /No approved neutral policy projection exists/);
+		assert.match(ctx.ui.notifications.at(-1).message, /dispatch gentle-init for exact approval/);
+		assert.doesNotMatch(ctx.ui.notifications.at(-1).message, /Wrote openspec\/config\.yaml|SDD initialized/);
+		assert.equal(ctx.ui.notifications.at(-1).level, "warning");
 		const explore = await hooks.get("before_agent_start")[0]({ agentName: "sdd-explore", systemPrompt: "You are the SDD explore executor for Gentle AI." }, ctx);
 		assert.match(explore.systemPrompt, /explicit current-session choices/);
 		assert.equal(ctx.ui.selections.length, 1, "confirmation -> sdd-init -> explore must reuse the resolved preflight");
 		const nextSession = createCtx(sddCwd, true, "cold-start-with-saved-preferences");
 		await hooks.get("input")[0]({ text: "/sdd", source: "interactive" }, nextSession);
 		assert.equal(nextSession.ui.selections.length, 1, "saved preferences still require confirmation in a new session");
-		assert.equal(await readFile(join(sddCwd, "openspec", "config.yaml"), "utf8"), initializedConfig, "new session confirmation must not reset project initialization");
+		assert.equal(existsSync(join(sddCwd, "openspec", "config.yaml")), false, "new session confirmation must not create policy");
 
 		await commands.get("gentle:sdd-preflight").handler("--edit", ctx);
 		assert.equal(ctx.ui.selections.length, 3, "--edit permits changes after confirmed sdd-init");
@@ -1854,12 +1844,20 @@ async function run() {
 			`---\nname: sdd-apply\ndescription: Apply phase\nmodel: keep/provider-model\n---\n\nbody\n`,
 		);
 		await writeFile(globalModelsPath, "{ invalid json");
+		await mkdir(join(invalidSddInitCwd, "openspec"), { recursive: true });
+		const existingConfig = "schema: spec-driven\ntesting:\n  rubric:\n    active: false\n";
+		await writeFile(join(invalidSddInitCwd, "openspec", "config.yaml"), existingConfig);
 		const ctx = createCtx(invalidSddInitCwd, true, "invalid-sdd-init-session");
 		await commands.get("gentle-sdd-init").handler("", ctx);
 		assert.equal(ctx.ui.notifications[1].level, "warning");
 		assert.match(ctx.ui.notifications[1].message, /Model routing skipped:/);
 		assert.match(ctx.ui.notifications[1].message, /models\.json/);
-		assert.match(ctx.ui.notifications.at(-1).message, /Wrote openspec\/config\.yaml/);
+		assert.match(ctx.ui.notifications.at(-1).message, /Preserved existing neutral policy projection/);
+		assert.match(ctx.ui.notifications.at(-1).message, /approval must be verified by parent/);
+		assert.match(ctx.ui.notifications.at(-1).message, /does not alter policy bytes/);
+		assert.doesNotMatch(ctx.ui.notifications.at(-1).message, /Wrote openspec\/config\.yaml|SDD initialized/);
+		assert.equal(ctx.ui.notifications.at(-1).level, "info");
+		assert.equal(await readFile(join(invalidSddInitCwd, "openspec", "config.yaml"), "utf8"), existingConfig);
 		const preservedAgent = await readFile(
 			join(invalidSddInitCwd, ".pi", "agents", "sdd-apply.md"),
 			"utf8",

@@ -124,6 +124,22 @@ One `odd/tasks/<feature-name>.md` keeps objective/problem/why, scope/constraints
 
 TDD follows configured mode, source, and exact runner, forwarded to workers and refreshed on resume. Tests existing does not enable it; disabled TDD still runs functional checks. Native RDD is separate and user-owned.
 
+#### Workflow-neutral TDD policy
+
+TDD policy belongs to the project, not to ODD or SDD. `gentle-init` is a delegation-owned package agent that the parent orchestrator dispatches automatically from its routing contract; users do not need to invoke an SDD phase to create or refresh policy.
+
+| Policy state | Parent route |
+|---|---|
+| Valid, active, unchanged | Consume directly; do not dispatch `gentle-init`. |
+| Absent, stale, unverifiable, or explicitly requested for update | Dispatch `gentle-init` to produce a candidate. |
+| New authority present | Use it without reading or comparing the legacy migration input. |
+
+Detection never activates TDD. `gentle-init` only authors exact candidate bytes; the parent materializes a preview, computes and binds approval to its checksum, destination, and source revision, then publishes the unchanged approved bytes and reads them back. The parent prefers a concise localized table; a verified full-candidate reference plus destination and checksum is the fallback.
+
+New Engram policy uses `gentle-init/{project}`. Read legacy `sdd-init/{project}` only when the new key is absent; once the new key exists, it wins and legacy is neither read nor changed automatically. Existing `openspec/config.yaml` remains compatible. `sdd-init` is bootstrap-only, and `/gentle-sdd-init` preserves existing config or routes missing policy through `gentle-init` instead of deriving `strict_tdd` from tests.
+
+These are shipped orchestration contracts: prompt tests prove instruction delivery, not autonomous model compliance. See the [policy flow, migration steps, and rollback boundary](docs/readme-reference.md#workflow-neutral-tdd-policy).
+
 **Why not SDD every day?** Its separate proposal/spec/design/tasks artifacts and phase handoffs add coordination that ordinary work often does not need. Choose SDD explicitly when you want those formal artifacts, never automatically because of size, ambiguity, or risk. SDD remains supported, not deprecated.
 
 **[→ ODD details and recovery](docs/readme-reference.md#organic-driven-development)**
