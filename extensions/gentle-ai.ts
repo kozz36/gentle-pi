@@ -885,10 +885,10 @@ function renderRddStatusLine(
 // start, so an unbounded native read would stall session start behind a
 // hung `gentle-ai` child (gentle-pi#661 native-review escalation). The
 // production call site (before_agent_start) passes
-// `AbortSignal.timeout(RDD_STATUS_TIMEOUT_MS)`; resolveRddModeStatus also
-// races the call against that same signal itself (not just the CLI's own
-// signal handling) so an abort is honored even against a stub/mock
-// reviewMode that ignores its `signal` argument, as tests do.
+// `AbortSignal.timeout(RDD_STATUS_TIMEOUT_MS)` for native child cancellation;
+// resolveRddModeStatus additionally keeps a referenced timer for the same
+// bound, so an abort is honored even against a stub/mock reviewMode that
+// ignores its `signal` argument without letting Node exit first.
 const RDD_STATUS_TIMEOUT_MS = 3000;
 // Repeated session/agent-start builds within this window reuse the last
 // resolved status instead of respawning the native binary. Deliberately
@@ -971,6 +971,20 @@ async function readRddModeStatusOnce(
 		return result.status;
 	} catch {
 		return undefined;
+	}
+}
+
+async function withReferencedRddStatusDeadline<T>(operation: Promise<T>): Promise<T | undefined> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<undefined>(resolve => {
+		timer = setTimeout(() => resolve(undefined), RDD_STATUS_TIMEOUT_MS);
+	});
+	try {
+		return await Promise.race([operation, deadline]);
+	} catch {
+		return undefined;
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
 	}
 }
 
@@ -1081,7 +1095,7 @@ async function resolveRddModeStatus(
 	const nowMs = now();
 	const cached = rddStatusMemo.get(cwd);
 	if (cached !== undefined && cached.expiresAt > nowMs) return cached.status;
-	const status = await readRddModeStatusOnce(nativeReviewCli, cwd, signal);
+	const status = await withReferencedRddStatusDeadline(readRddModeStatusOnce(nativeReviewCli, cwd, signal));
 	rddStatusMemo.set(cwd, { status, expiresAt: nowMs + RDD_STATUS_MEMO_TTL_MS });
 	if (status === undefined && !rddStatusUnavailableWarned) {
 		rddStatusUnavailableWarned = true;

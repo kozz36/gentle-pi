@@ -79,6 +79,33 @@ function countingReviewMode(result: NativeReviewModeResult): { cli: Pick<NativeR
 	};
 }
 
+async function trackStatusDeadline(run: () => Promise<void>): Promise<{ created: number; cleared: number }> {
+	const originalSetTimeout = globalThis.setTimeout;
+	const originalClearTimeout = globalThis.clearTimeout;
+	const handles = new Set<ReturnType<typeof setTimeout>>();
+	let created = 0;
+	let cleared = 0;
+	globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+		const handle = originalSetTimeout(...args);
+		if (args[1] === RDD_STATUS_TIMEOUT_MS) {
+			created += 1;
+			handles.add(handle);
+		}
+		return handle;
+	}) as typeof setTimeout;
+	globalThis.clearTimeout = ((handle: Parameters<typeof clearTimeout>[0]) => {
+		if (handles.delete(handle as ReturnType<typeof setTimeout>)) cleared += 1;
+		originalClearTimeout(handle);
+	}) as typeof clearTimeout;
+	try {
+		await run();
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+		globalThis.clearTimeout = originalClearTimeout;
+	}
+	return { created, cleared };
+}
+
 test("renderRddStatusLine renders the fail-closed unknown line for an unresolved status", () => {
 	assert.equal(
 		renderRddStatusLine(undefined),
@@ -155,6 +182,18 @@ test("resolveRddModeStatus resolves to undefined when the native reviewMode call
 	assert.equal(status, undefined);
 });
 
+test("resolveRddModeStatus clears its referenced deadline when reviewMode settles first", async () => {
+	clearRddStatusMemoForTesting();
+	const tracked = await trackStatusDeadline(async () => {
+		const status = await resolveRddModeStatus(
+			fakeReviewMode(modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL)),
+			"/repo-deadline-cleanup",
+		);
+		assert.equal(status?.effective, "on");
+	});
+	assert.deepEqual(tracked, { created: 1, cleared: 1 });
+});
+
 test("resolveRddModeStatus resolves to undefined within the deadline when reviewMode never settles", async () => {
 	// gentle-pi#661 native-review escalation: a hung `gentle-ai` child must
 	// not stall session start. resolveRddModeStatus races the call against
@@ -165,10 +204,14 @@ test("resolveRddModeStatus resolves to undefined within the deadline when review
 	const neverSettling = fakeReviewMode(() => new Promise<never>(() => {}));
 	const deadlineMs = 150;
 	const start = Date.now();
-	const status = await resolveRddModeStatus(neverSettling, "/repo-hung", AbortSignal.timeout(deadlineMs));
+	let status: NativeReviewModeStatus | undefined;
+	const tracked = await trackStatusDeadline(async () => {
+		status = await resolveRddModeStatus(neverSettling, "/repo-hung", AbortSignal.timeout(deadlineMs));
+	});
 	const elapsed = Date.now() - start;
 	assert.equal(status, undefined);
 	assert.ok(elapsed < deadlineMs + 1000, `expected the read to resolve near the ${deadlineMs}ms deadline, took ${elapsed}ms`);
+	assert.deepEqual(tracked, { created: 1, cleared: 1 });
 });
 
 test("resolveRddModeStatus memoizes a resolved status per cwd for RDD_STATUS_MEMO_TTL_MS", async () => {
