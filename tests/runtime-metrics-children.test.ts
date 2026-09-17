@@ -20,6 +20,8 @@ const response = (model = "gpt-4o", native = "low") => {
 	assert.ok(event?.type === TASK_EVENT.RESPONSE_OBSERVATION);
 	return event.observation;
 };
+const packagedClassAlias = (name: string): string => name === "sdd-proposal" ? "sdd-propose"
+	: name === "gentle-init" ? "worker" : name;
 const launch = () => launchSelection(workerDefinition, { provider: "openai", id: "gpt-4o" }, "high");
 const event = (taskId = "local-task") => childEvent("local-session", taskId, launch(), "completed", {
 	coverage: "final_assistant_messages_only", agentSettled: true, responses: [response(), response("gpt-4o-mini", "high")], droppedResponses: 2,
@@ -34,8 +36,9 @@ test("installed package definitions retain classification after the actual routi
 	const route = runInNewContext(`(${stripTypeScriptTypes(transform)})`);
 	for (const entry of readdirSync(new URL("../assets/agents/", import.meta.url)).filter(file => file.endsWith(".md"))) {
 		const file = entry.slice(0, -3);
-		const className = file === "sdd-proposal" ? "sdd-propose"
-			: file.startsWith("gentle-ai-") ? file.slice("gentle-ai-".length) : file;
+		const className = packagedClassAlias(
+			file.startsWith("gentle-ai-") ? file.slice("gentle-ai-".length) : file,
+		);
 		const kind = parseAgentClass(className);
 		if (file === "sdd-remediate") {
 			assert.equal(kind, undefined, "remediation stays dark in the existing telemetry taxonomy");
@@ -54,7 +57,7 @@ test("installed package definitions retain classification after the actual routi
 			const parsed = parseAgentDefinition(route(content, entry), asset.pathname, "global");
 			assert.ok("instructions" in parsed);
 			assert.equal(classifyBuiltinAgent(parsed), kind, `${kind}: installed routing`);
-			const customizedClass = parsed.name === "sdd-proposal" ? "sdd-propose" : parseAgentClass(parsed.name) ?? "unknown";
+			const customizedClass = parseAgentClass(packagedClassAlias(parsed.name)) ?? "unknown";
 			assert.equal(classifyBuiltinAgent({ ...parsed, instructions: `${parsed.instructions}\nOverride` }), customizedClass);
 			assert.equal(classifyBuiltinAgent({ ...parsed, tools: ["different-tool"] }), customizedClass);
 			assert.equal(classifyBuiltinAgent({ ...parsed, description: "different description" }), customizedClass);

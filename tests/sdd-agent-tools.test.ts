@@ -10,6 +10,7 @@ const GENERIC_ROLE_TOOLS: Record<string, string[]> = {
 	"gentle-ai-worker.md": ["read", "grep", "find", "edit", "write", "bash", "mem_save"],
 	"gentle-ai-verify.md": ["read", "grep", "find", "bash"],
 };
+const GENTLE_INIT_TOOLS = ["read", "grep", "find", "mem_search", "mem_get_observation"];
 
 function readFrontmatter(path: string): string {
 	const text = readFileSync(path, "utf8");
@@ -130,6 +131,23 @@ test("generic non-SDD agents declare exact role tool allowlists", () => {
 			assertGenericRoleBody(fileName, readFileSync(path, "utf8"));
 		}
 	}
+});
+
+test("gentle-init is a read-only policy candidate author and inspector", () => {
+	const path = join(assetsAgentsDir, "gentle-init.md");
+	assert.ok(existsSync(path), "gentle-init.md must be a package-owned agent asset");
+	assert.deepEqual(readTools(path), GENTLE_INIT_TOOLS);
+	const source = readFileSync(path, "utf8");
+	assert.doesNotMatch(source, /subagent_|gentle_review|ask_user_/);
+	assert.match(source, /candidate author and inspector/i);
+	assert.match(source, /Never receive or evaluate approval/i);
+	assert.match(source, /never activate or persist policy/i);
+	assert.match(source, /exact UTF-8 candidate bytes/i);
+	assert.match(source, /destination and backend/i);
+	assert.match(source, /source revision or preimage identity/i);
+	assert.match(source, /Preserve every manual or unrecognized rubric row byte-for-byte/i);
+	assert.match(source, /Only when the new topic is absent[\s\S]*legacy `sdd-init\/\{project\}`/i);
+	assert.match(source, /Never infer TDD activation from test files, frameworks, test commands, or existing tests/i);
 });
 
 test("optional verification retains practical evidence without retired attestation admission", () => {

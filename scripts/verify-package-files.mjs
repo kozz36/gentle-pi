@@ -16,6 +16,7 @@ const requiredPaths = [
   "assets/agents/gentle-ai-explore.md",
   "assets/agents/gentle-ai-verify.md",
   "assets/agents/gentle-ai-worker.md",
+  "assets/agents/gentle-init.md",
   "assets/agents/jd-fix-agent.md",
   "assets/agents/jd-judge-a.md",
   "assets/agents/jd-judge-b.md",

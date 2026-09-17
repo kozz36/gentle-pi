@@ -58,6 +58,7 @@ export default function (pi) {
 		};
 		const before = await names();
 		assert.match(before, /- gentle-ai-explore \(global\)/);
+		assert.match(before, /- gentle-init \(global\)/, "ordinary delegation installation must expose gentle-init");
 		assert.match(before, /- review-risk \(global\)/);
 		assert.doesNotMatch(before, /- sdd-/, "fresh startup must not install SDD definitions");
 		assert.equal(existsSync(join(agentDir, "chains", "sdd-full.chain.md")), false);
@@ -73,7 +74,7 @@ export default function (pi) {
 		}
 		assert.ok(existsSync(join(agentDir, "chains", "sdd-full.chain.md")));
 		assert.equal(session.messages.length, 0, "slash activation must not start a model turn");
-		console.log("SDK discovery: delegation/review only -> /gentle:install-sdd -> same-session sdd-init/sdd-apply and support");
+		console.log("SDK discovery: delegation/review with gentle-init -> /gentle:install-sdd -> same-session sdd-init/sdd-apply and support");
 	} finally {
 		await runtime.dispose();
 	}
@@ -100,7 +101,7 @@ if (process.env.GENTLE_PI_ASSET_PROOF_CHILD === "1") {
 			});
 			assert.ifError(result.error);
 			assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-			assert.match(result.stdout, /SDK discovery: delegation\/review only/);
+			assert.match(result.stdout, /SDK discovery: delegation\/review with gentle-init/);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
