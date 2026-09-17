@@ -59,7 +59,10 @@ test("legacy policy is migration input only while the new authority is absent", 
 		"same neutral policy authority as ODD",
 		"dispatch `gentle-init` before `sdd-init`",
 		"valid, active, and unchanged",
+		"use it without reading or comparing the legacy authority",
 	]);
+	assert.doesNotMatch(sddWorkflow, /dual authorities diverge/i);
+	assert.doesNotMatch(sddWorkflow, /Neither SDD nor freshness guesses choose a winner/i);
 });
 
 test("gentle-init is the sole candidate author and inspector while the parent alone publishes", () => {

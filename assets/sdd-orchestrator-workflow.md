@@ -99,7 +99,7 @@ Selected SDD consumes the same neutral policy authority as ODD. After session pr
 - When policy is valid, active, and unchanged, consume it without launching `gentle-init`.
 - When policy is valid, inactive, and unchanged, preserve inactive mode without launching `gentle-init`; SDD selection does not activate TDD.
 - When policy is absent, stale, unverifiable, or explicitly requested for update, dispatch `gentle-init` before `sdd-init` and follow the parent interaction-relay contract in `orchestrator-delegation.md`.
-- When dual authorities diverge, block before bootstrap. Neither SDD nor freshness guesses choose a winner.
+- When the new authority exists, use it without reading or comparing the legacy authority; consult legacy migration input only when the new authority is absent.
 
 Forward the parent-approved neutral policy locator and status to `sdd-init`. If `gentle-init` returns a revised candidate during correction or verification, any prior approval is invalid; the parent redisplays and obtains approval for the new material revision before continuing. Test presence and detected runners remain capability evidence only.
 
