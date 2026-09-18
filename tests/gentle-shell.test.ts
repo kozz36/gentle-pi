@@ -361,10 +361,18 @@ function installedPrompt(ctx: ExtensionContext, ui: FakeUi, handlers: Map<string
 	return factory(fakeTui, editorTheme, fakeKeybindings);
 }
 
-test("gentleShell frames the editor with the petal prompt and a hint while empty", () => {
+test("gentleShell frames the editor with the muted border role, petal prompt, and a hint while empty", () => {
 	const { pi, handlers } = fakePi();
 	gentleShell(pi, {});
 	const { ctx, ui } = fakeContext();
+	const foregroundCalls: Array<{ role: string; text: string }> = [];
+	(ctx.ui as unknown as { theme: typeof plainTheme }).theme = {
+		...plainTheme,
+		fg(role: string, text: string) {
+			foregroundCalls.push({ role, text });
+			return text;
+		},
+	};
 	const editor = installedPrompt(ctx, ui, handlers);
 	assert.equal(ui.workingVisible, false, "pi's own Working row must be hidden");
 	editor.focused = true;
@@ -373,6 +381,11 @@ test("gentleShell frames the editor with the petal prompt and a hint while empty
 	assert.doesNotMatch(editor.render(60).join("\n"), /\x1b\[44m/, "prompt must not paint passive backgrounds");
 	assert.match(lines[1], /^│.*type, or \/ for commands +│$/);
 	assert.match(lines[lines.length - 1], /^╰─+╯$/);
+	const frameCalls = foregroundCalls.filter(({ text }) => /[╭╮│╰╯─]/.test(text));
+	assert.ok(frameCalls.length > 0, "prompt frame glyphs must be themed");
+	assert.ok(frameCalls.every(({ role }) => role === "borderMuted"), "every prompt frame glyph cell must use borderMuted");
+	assert.ok(foregroundCalls.some(({ role, text }) => role === "borderAccent" && text.includes("✿")), "the idle petal keeps its state-specific borderAccent role");
+	assert.equal(foregroundCalls.some(({ role }) => role === "border"), false, "the prompt frame must not use the unrelated border role");
 	editor.setText("hola");
 	assert.doesNotMatch(editor.render(60).map(stripAnsi)[1], /type, or/);
 	editor.dispose();

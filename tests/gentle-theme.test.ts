@@ -60,6 +60,12 @@ const REQUIRED_THEME_COLOR_KEYS = [
 	"bashMode",
 ] as const;
 
+const DOCUMENTED_REQUIRED_THEME_COLOR_KEYS = [
+	...REQUIRED_THEME_COLOR_KEYS,
+	"scrollbarTrack",
+	"scrollbarThumb",
+] as const;
+
 interface PackageJsonPiManifest {
 	theme?: string;
 	themes?: string[];
@@ -115,6 +121,52 @@ test("package manifest exposes bundled themes to Pi discovery", () => {
 		undefined,
 		"package manifest must not auto-apply the bundled theme",
 	);
+});
+
+test("bundled Kozz Pi theme is discoverable without automatic selection", () => {
+	const packageJson = readJson<PackageJson>(join(PACKAGE_ROOT, "package.json"));
+	const theme = readJson<GentleThemeJson>(join(PACKAGE_ROOT, "themes", "kozz.json"));
+
+	assert.equal(theme.name, "kozz");
+	assert.ok(packageJson.pi?.themes?.includes("./themes"));
+	assert.ok(packageJson.files?.includes("themes/"));
+	assert.equal(packageJson.pi?.theme, undefined);
+});
+
+test("bundled Kozz Pi theme defines every documented required role without remapping the source palette", () => {
+	const theme = readJson<GentleThemeJson>(join(PACKAGE_ROOT, "themes", "kozz.json"));
+	const colors = theme.colors ?? {};
+
+	assert.deepEqual(
+		DOCUMENTED_REQUIRED_THEME_COLOR_KEYS.filter((key) => !(key in colors)),
+		[],
+	);
+	assert.deepEqual(
+		["searchMatchBg", "searchMatchText", "thinkingMax"].filter((key) => !(key in colors)),
+		[],
+	);
+
+	assert.equal(colors.accent, "primary");
+	assertResolvedThemeColor(theme, "accent", "#ff4f1f");
+	assert.equal(colors.borderMuted, "editorBorderMuted");
+	assertResolvedThemeColor(theme, "borderMuted", "#d946ef");
+	assert.equal(colors.scrollbarTrack, "borderSubtle");
+	assertResolvedThemeColor(theme, "scrollbarTrack", "#141414");
+	assert.equal(colors.toolPendingBg, "toolPendingCyanBg");
+	assertResolvedThemeColor(theme, "toolPendingBg", "#08252b");
+	assert.equal(colors.success, "darkOrange");
+	assertResolvedThemeColor(theme, "success", "#c45a18");
+	assert.equal(colors.toolSuccessBg, "toolSuccessPurpleBg");
+	assertResolvedThemeColor(theme, "toolSuccessBg", "#21132e");
+	assert.equal(colors.error, "red");
+	assertResolvedThemeColor(theme, "error", "#ff0000");
+	assert.equal(colors.toolErrorBg, "diffRedBg");
+	assertResolvedThemeColor(theme, "toolErrorBg", "#2e090e");
+	assert.deepEqual(theme.export, {
+		pageBg: "black",
+		cardBg: "surface",
+		infoBg: "elevated",
+	});
 });
 
 test("bundled Gentleman-Sexy Pi theme is available under its exact name", () => {

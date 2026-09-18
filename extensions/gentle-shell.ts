@@ -183,7 +183,7 @@ interface PromptEditorDeps {
 	pending(): boolean;
 }
 
-const PROMPT_FRAME_ROLE = "border";
+const PROMPT_FRAME_ROLE = "borderMuted";
 
 export class GentlePromptEditor extends CustomEditor {
 	private promptState: PromptState = PROMPT_STATE.IDLE;
@@ -213,8 +213,8 @@ export class GentlePromptEditor extends CustomEditor {
 		const lines = super.render(Math.max(1, width - 2));
 		if (this.getText() === "" && lines.length === 3) lines[1] = withPromptHint(lines[1], PROMPT_HINT, this.deps.fg);
 		const state = this.promptState === PROMPT_STATE.WORKING && this.deps.pending() ? PROMPT_STATE.QUEUED : this.promptState;
-		// The frame keeps the theme's border color rather than pi's thinking-level
-		// color, so the prompt reads as one panel with the cards around it.
+		// The frame keeps the theme's muted border color rather than pi's
+		// thinking-level color, so it remains distinct from the active petal.
 		return framePromptLines(lines, width, {
 			state,
 			tick: this.tick,
