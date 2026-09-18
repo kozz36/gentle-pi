@@ -16,7 +16,7 @@ Ship the user's Kozz theme as an explicitly selectable Gentle Shell package them
 - [x] KTP-001 Add and validate packaged `themes/kozz.json` without automatic selection.
 - [x] KTP-002 Use `borderMuted` for the Gentle Shell prompt frame and Pi's default shell for quiet tools; update focused tests.
 - [x] KTP-003 Run focused/full test verification and native review, then commit the UI/theme work unit.
-- [ ] KTP-004 Build the isolated aggregate preview, document selection/rollback, and publish only after the authorized verification gate.
+- [ ] KTP-004 Publish the verified experimental fork preview and document selection/rollback in issue #59.
 
 ## Acceptance
 
@@ -43,4 +43,8 @@ Ship the user's Kozz theme as an explicitly selectable Gentle Shell package them
 - Independent verifier `01a0b3bc-8119-7680` approved the bounded candidate: 98 focused tests passed, 2,655 full-suite tests passed with 38 skips, exact theme parity held except `scrollbarTrack`, and no unrelated paths changed.
 - Native review `review-aac603fafc82b385` approved and was acknowledged; its only advisory was that the local absolute source-theme path is nonportable provenance.
 - UI/theme work unit committed as `df6ab2a9` (`feat(theme): add selectable Kozz preview`).
-- Package/prepack gates and live isolated theme selection remain intentionally deferred to KTP-004.
+- Package gates passed: six runtime modules, 169 package files, 69 byte-pinned artifacts, and packed-package E2E with 65 installed packages.
+- Disposable policy-only and aggregate packs passed their prepack suites (2,653 and 2,655 passing tests; 38 skips each). Their manifests match and neither selects a default theme; only the aggregate tarball adds `themes/kozz.json` plus the reviewed renderer/test changes.
+- Installed-package PTY smoke tests proved policy-only reports `Theme not found: kozz` and falls back to dark, while aggregate accepts and shows `kozz`; Pi still displays the unavailable requested name in `/settings` after fallback.
+- Preseeding isolated settings with `lastChangelogVersion: 0.85.1` kept settings bytes unchanged across all final runtime invocations (SHA-256 `abbe6f31e190fafa2e6b394f8e9bfe61046689547ba783aec898afc60d897547`). All temporary packages, caches, sessions, and transcripts were removed.
+- Pure visual color distinctions and model interaction remain unverified; publication and the issue #59 instructions remain the final KTP-004 delivery step.
