@@ -15,7 +15,7 @@ Ship the user's Kozz theme as an explicitly selectable Gentle Shell package them
 
 - [x] KTP-001 Add and validate packaged `themes/kozz.json` without automatic selection.
 - [x] KTP-002 Use `borderMuted` for the Gentle Shell prompt frame and Pi's default shell for quiet tools; update focused tests.
-- [ ] KTP-003 Run focused/full package verification and native review, then commit the UI/theme work unit.
+- [x] KTP-003 Run focused/full test verification and native review, then commit the UI/theme work unit.
 - [ ] KTP-004 Build the isolated aggregate preview, document selection/rollback, and publish only after the authorized verification gate.
 
 ## Acceptance
@@ -40,4 +40,7 @@ Ship the user's Kozz theme as an explicitly selectable Gentle Shell package them
 - `pnpm run typecheck` — 197 recorded diagnostics, no regressions; 2 existing file/code pairs improved.
 - `git diff --check` — passed.
 - `pnpm test` — 2,693 total; 2,655 passed; 0 failed; 38 skipped. Provider-contract check and runtime harness also passed in the composed script.
-- Package/prepack gates and live isolated theme selection remain intentionally deferred to KTP-003/KTP-004.
+- Independent verifier `01a0b3bc-8119-7680` approved the bounded candidate: 98 focused tests passed, 2,655 full-suite tests passed with 38 skips, exact theme parity held except `scrollbarTrack`, and no unrelated paths changed.
+- Native review `review-aac603fafc82b385` approved and was acknowledged; its only advisory was that the local absolute source-theme path is nonportable provenance.
+- UI/theme work unit committed as `df6ab2a9` (`feat(theme): add selectable Kozz preview`).
+- Package/prepack gates and live isolated theme selection remain intentionally deferred to KTP-004.
