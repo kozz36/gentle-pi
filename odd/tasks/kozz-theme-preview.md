@@ -16,7 +16,7 @@ Ship the user's Kozz theme as an explicitly selectable Gentle Shell package them
 - [x] KTP-001 Add and validate packaged `themes/kozz.json` without automatic selection.
 - [x] KTP-002 Use `borderMuted` for the Gentle Shell prompt frame and Pi's default shell for quiet tools; update focused tests.
 - [x] KTP-003 Run focused/full test verification and native review, then commit the UI/theme work unit.
-- [ ] KTP-004 Publish the verified experimental fork preview and document selection/rollback in issue #59.
+- [x] KTP-004 Publish the verified experimental fork preview and document selection/rollback in issue #59.
 
 ## Acceptance
 
@@ -47,4 +47,6 @@ Ship the user's Kozz theme as an explicitly selectable Gentle Shell package them
 - Disposable policy-only and aggregate packs passed their prepack suites (2,653 and 2,655 passing tests; 38 skips each). Their manifests match and neither selects a default theme; only the aggregate tarball adds `themes/kozz.json` plus the reviewed renderer/test changes.
 - Installed-package PTY smoke tests proved policy-only reports `Theme not found: kozz` and falls back to dark, while aggregate accepts and shows `kozz`; Pi still displays the unavailable requested name in `/settings` after fallback.
 - Preseeding isolated settings with `lastChangelogVersion: 0.85.1` kept settings bytes unchanged across all final runtime invocations (SHA-256 `abbe6f31e190fafa2e6b394f8e9bfe61046689547ba783aec898afc60d897547`). All temporary packages, caches, sessions, and transcripts were removed.
-- Pure visual color distinctions and model interaction remain unverified; publication and the issue #59 instructions remain the final KTP-004 delivery step.
+- Pure visual color distinctions and model interaction remain unverified.
+- Published fork branch `feat/kozz-theme-preview` and annotated tag `v3.2.0-overlay.2-preview.1`; the tag resolves to `1b33b09507b1464060eabc0e956983159dad9656` (tag object `56fb0e1faeca0b4a3c614aeb8ed5917991288d68`).
+- Posted temporary `pi -e` policy-only and aggregate testing plus rollback instructions to issue #59: https://github.com/Gentleman-Programming/gentle-shell/issues/59#issuecomment-5728352969
