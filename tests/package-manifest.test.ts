@@ -131,9 +131,13 @@ test("technical reference declares the tested Pi minimum required for agent_sett
 	assert.match(readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8"), /\]\(docs\/readme-reference\.md(?:#[^)]+)?\)/);
 });
 
-test("packed runtime declares its pi-ai compat import as a direct exact dependency", () => {
+test("Pi host-provided imports are peers, not bundled runtime dependencies", () => {
 	const manifest = readPackageJson();
-	assert.equal(manifest.dependencies?.["@earendil-works/pi-ai"], "0.87.1");
+	for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-tui"]) {
+		assert.equal(manifest.peerDependencies?.[name], "*", `${name} must use the host instance`);
+		assert.equal(manifest.dependencies?.[name], undefined, `${name} must not be bundled`);
+		assert.equal(manifest.devDependencies?.[name], "0.87.1", `${name} keeps the tested local version`);
+	}
 });
 
 test("package manifest has no obsolete native activation build surface", () => {

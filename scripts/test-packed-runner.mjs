@@ -1668,7 +1668,15 @@ async function testUnhookedPackedImports() {
 		receipt.packVerified = true;
 		stage = "install";
 		selectUnhookedCheck(receipt, "install-command");
-		writeFileSync(join(consumerDirectory, "package.json"), JSON.stringify({ name: "gentle-pi-unhooked-import-proof", private: true, dependencies: { "@earendil-works/pi-coding-agent": sdkVersion } }), "utf8");
+		writeFileSync(join(consumerDirectory, "package.json"), JSON.stringify({
+			name: "gentle-pi-unhooked-import-proof",
+			private: true,
+			dependencies: {
+				"@earendil-works/pi-ai": sdkVersion,
+				"@earendil-works/pi-coding-agent": sdkVersion,
+				"@earendil-works/pi-tui": sdkVersion,
+			},
+		}), "utf8");
 		runBoundedNpm("install", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", "--omit=dev", "--legacy-peer-deps", tarball, `@earendil-works/pi-coding-agent@${sdkVersion}`], env, consumerDirectory);
 		receipt.installCompleted = true;
 		stage = "artifact-check";
