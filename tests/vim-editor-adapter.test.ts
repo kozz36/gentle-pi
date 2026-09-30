@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, stripTypeScriptTypes } from "node:module";
 import { pathToFileURL } from "node:url";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { CURSOR_MARKER, Editor, visibleWidth } from "@earendil-works/pi-tui";
@@ -9,6 +9,33 @@ import { createVimEditorAdapter } from "../lib/vim-editor-adapter.ts";
 import { resolveVimRuntime, VIM_AGENT_INDEX_PATTERN, VIM_CLI_ENTRY_PATTERN } from "../extensions/gentle-shell.ts";
 import { VimOperatorEngine } from "../lib/vim-operator-engine.ts";
 import { VimVisualEngine } from "../lib/vim-visual-engine.ts";
+
+test("host-aliased TUI loads without local metadata but private editing requires certification", async () => {
+  const missingMetadata = `export const createRequire = () => (id) => {
+    if (id !== "@earendil-works/pi-tui/package.json") throw new Error("Unexpected metadata request");
+    throw Object.assign(new Error("Cannot find module '@earendil-works/pi-tui/package.json'"), { code: "MODULE_NOT_FOUND" });
+  };`;
+  const source = readFileSync(new URL("../lib/vim-editor-adapter.ts", import.meta.url), "utf8")
+    .replace('"@earendil-works/pi-tui"', JSON.stringify(pathToFileURL(createRequire(import.meta.url).resolve("@earendil-works/pi-tui")).href))
+    .replace('"node:module"', JSON.stringify(`data:text/javascript;base64,${Buffer.from(missingMetadata).toString("base64")}`));
+  // Execute the actual adapter in memory: the root is host-provided while
+  // native metadata resolution fails exactly as it does under Pi's alias.
+  const isolated = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source)).toString("base64")}`) as typeof import("../lib/vim-editor-adapter.ts");
+  const e = editor();
+  for (const version of ["0.85.1", "0.87.1"]) {
+    assert.throws(() => isolated.createVimEditorAdapter(e, version), /Unsupported Pi editor/);
+    assert.doesNotThrow(() => isolated.createVimEditorAdapter(e, version, Editor, version));
+  }
+  assert.throws(() => isolated.createVimEditorAdapter(e, "0.99.1", Editor, "0.99.1"), /Unsupported Pi editor/);
+  assert.throws(() => isolated.createVimEditorAdapter(e, "0.87.1", Editor, "0.85.1"), /Unsupported Pi editor/);
+  assert.throws(() => isolated.createVimEditorAdapter({}, "0.87.1", Editor, "0.87.1"), /Unsupported Pi editor/);
+  class OtherEditor extends Editor {}
+  const other = new OtherEditor({ terminal: { rows: 24 }, requestRender() {} } as never, { borderColor: (s: string) => s } as never);
+  assert.throws(() => isolated.createVimEditorAdapter(other, "0.87.1", OtherEditor), /Unsupported Pi editor/);
+  assert.doesNotThrow(() => isolated.createVimEditorAdapter(other, "0.87.1", OtherEditor, "0.87.1"));
+  assert.throws(() => isolated.createVimEditorAdapter(e, "0.87.1", OtherEditor, "0.87.1"), /Unsupported Pi editor/);
+  assert.equal(e.getText(), "", "rejected identity checks do not mutate the host editor");
+});
 
 function editor(): Editor {
   return new Editor({ terminal: { rows: 24 }, requestRender() {} } as never, { borderColor: (s: string) => s } as never);

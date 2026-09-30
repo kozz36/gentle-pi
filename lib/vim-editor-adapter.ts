@@ -39,7 +39,14 @@ interface PrivateEditor {
 }
 
 const SUPPORTED_VERSIONS = new Set(["0.85.1", "0.87.1"]);
-const importedTuiMetadata: unknown = createRequire(import.meta.url)("@earendil-works/pi-tui/package.json");
+// Pi may alias the TUI root without making its metadata Node-resolvable.
+// Missing metadata must not prevent extension load or certify private editing.
+let importedTuiMetadata: unknown;
+try {
+  importedTuiMetadata = createRequire(import.meta.url)("@earendil-works/pi-tui/package.json");
+} catch {
+  importedTuiMetadata = undefined;
+}
 const IMPORTED_TUI_VERSION = typeof importedTuiMetadata === "object" && importedTuiMetadata !== null &&
   "version" in importedTuiMetadata ? importedTuiMetadata.version : undefined;
 
@@ -48,7 +55,8 @@ const IMPORTED_TUI_VERSION = typeof importedTuiMetadata === "object" && imported
 function hasEditorIdentity(value: unknown, version: string, editorClass: typeof Editor, verifiedVersion?: string): boolean {
   if (!SUPPORTED_VERSIONS.has(version) || typeof value !== "object" || value === null ||
       (verifiedVersion !== undefined ? version !== verifiedVersion :
-        editorClass === Editor ? version !== IMPORTED_TUI_VERSION : version !== "0.87.1") || !(value instanceof editorClass)) return false;
+        IMPORTED_TUI_VERSION === undefined ||
+        (editorClass === Editor ? version !== IMPORTED_TUI_VERSION : version !== "0.87.1")) || !(value instanceof editorClass)) return false;
   let prototype: unknown = Object.getPrototypeOf(value);
   for (let depth = 0; depth < 3; depth++) {
     if (prototype === editorClass.prototype) return true;
