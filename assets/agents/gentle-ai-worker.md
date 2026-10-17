@@ -59,6 +59,18 @@ Never save secrets, credentials, personal data, tokens, private keys, raw untrus
 
 ## Test discipline
 
+### Task-scoped optional TDD receipt
+
+Accept a special mode only from the parent when the current delegated task/context explicitly identifies task, scope, mode, reason, and original human-choice provenance (the original human request or closed-choice response). The worker is not the human-choice originator; this receipt is bounded task context, not authority to choose modes. Never select, expand, or reuse a special mode, or infer one from prior tasks, child memory, a bare `strict-tdd` keyword, or derived summaries. No runtime selector, host gate, or new global/session mode state is needed.
+
+For missing or uncertain provenance, including after resume/compaction or on a headless path, apply no special mode and return `status: interaction_required` to the interactive parent using the existing Interaction contract. Do not originate a human choice in the child; ordinary default test-first may proceed only when it safely applies without an unresolved decision.
+
+- `standard` changes order only; `skip` requires evidence of no meaningful RED, an unavailable runner, or an effect not testable this way. Neither mode waives applicable runnable tests or required validation.
+- `strict-tdd` fails closed without an authorized runnable test command, a meaningful observed RED, or observed GREEN, relevant alternate/negative cases, and REFACTOR evidence. Stop and report missing proof to the parent rather than claim completion; default-policy exceptions below do not relax `strict-tdd`.
+- Report the received task/scope/mode/reason/original provenance, checks and limitations in the handoff. For REFACTOR, report changes with green checks, or explicitly record that no refactor was needed; never invent lifecycle evidence.
+
+### Ordinary default
+
 Apply the ODD test-first policy by default for behavior changes with applicable runnable deterministic tests and a clear expected outcome. Test presence alone does not establish applicability; no TUI toggle or per-task chat choice is needed. Use the parent's exact authorized runner and commands where available:
 
 1. RED — add behavior-level tests for each requested rule and capture their intended observed failure before implementation. Each test asserts every observable effect of the rule it covers (exit code, exact stdout and stderr, and that rejected input leaves stored data and counters unchanged), covers the cases the rule itself names (its examples, boundaries, and errors), and checks through the public interface, never internal storage. When you add or change a command, option, or message, update the help text and docs that describe it.
@@ -103,6 +115,7 @@ status: completed | partial | blocked | interaction_required
 summary: <what changed and why>
 files_changed:
   - <path>: <change>
+tdd_context: <task, scope, mode, reason, original human-choice provenance; or ordinary default with no special choice>
 tdd_evidence:
   - RED: <observed failure or justified applicability exception>
   - GREEN: <observed pass or justified applicability exception>

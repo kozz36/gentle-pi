@@ -77,6 +77,43 @@ test("T23(d)(e): a quick check runs once and an unavailable verifier is reported
 	}
 });
 
+test("optional TDD: worker receives only a complete current-task human choice from the parent", () => {
+	containsAll(worker, [
+		"Accept a special mode only from the parent",
+		"current delegated task/context explicitly identifies task, scope, mode, reason, and original human-choice provenance",
+		"original human request or closed-choice response",
+		"The worker is not the human-choice originator",
+	], "worker mode receipt");
+});
+
+test("optional TDD: worker rejects inferred or uncertain authority and returns the decision to the parent", () => {
+	containsAll(worker, [
+		"Never select, expand, or reuse a special mode",
+		"prior tasks, child memory, a bare `strict-tdd` keyword, or derived summaries",
+		"missing or uncertain provenance, including after resume/compaction or on a headless path",
+		"return `status: interaction_required` to the interactive parent",
+		"ordinary default test-first may proceed only when it safely applies without an unresolved decision",
+	], "worker refusal boundary");
+});
+
+test("optional TDD: all modes retain checks and strict-tdd fails closed", () => {
+	containsAll(worker, [
+		"`standard` changes order only",
+		"`skip` requires evidence of no meaningful RED, an unavailable runner, or an effect not testable this way",
+		"Neither mode waives applicable runnable tests or required validation",
+		"`strict-tdd` fails closed without an authorized runnable test command, a meaningful observed RED, or observed GREEN, relevant alternate/negative cases, and REFACTOR evidence",
+		"default-policy exceptions below do not relax `strict-tdd`",
+	], "worker test obligations");
+});
+
+test("optional TDD: worker reports receipt, checks, and limitations without new mode state", () => {
+	containsAll(worker, [
+		"tdd_context: <task, scope, mode, reason, original human-choice provenance; or ordinary default with no special choice>",
+		"checks and limitations",
+		"No runtime selector, host gate, or new global/session mode state",
+	], "worker mode handoff");
+});
+
 test("T23(f): the verify agent allows a second correction only for the same blocker still failing", () => {
 	containsAll(lineStarting(verify, "5. **Every item.**"), [
 		"one correction batch and one recheck limited to the reported blockers",

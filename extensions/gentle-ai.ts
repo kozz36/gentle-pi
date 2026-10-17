@@ -9812,6 +9812,25 @@ function createGentleAiExtensionForTesting(
 		processAgentEndSubagentDepth.delete(sessionKey);
 	});
 
+	// Lazy reference only: registration and ordinary prompt rendering never read its body.
+	pi.registerTool({
+		name: "gentle_tdd_rubric",
+		label: "Gentle Task TDD Rubric",
+		description: "Parent-only read-only reference for genuinely unresolved task test applicability/classification or a requested task-scoped mode. No automatic classification or mode selection.",
+		parameters: { type: "object", properties: {}, additionalProperties: false } as const,
+		executionMode: "parallel",
+		async execute(_toolCallId, parameters) {
+			if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") {
+				throw new Error("The task TDD rubric is for the parent session only.");
+			}
+			if (!parameters || typeof parameters !== "object" || Array.isArray(parameters) || Object.keys(parameters).length !== 0) {
+				throw new Error("The task TDD rubric accepts no arguments.");
+			}
+			const text = await readFile(join(ASSETS_DIR, "optional-tdd-v3-rubric.md"), "utf8");
+			return { content: [{ type: "text", text }], details: {} };
+		},
+	});
+
 	// gentle-pi ODD input phase labels: the explicit half of the bounded ODD
 	// phase signal for the Gentle prompt's working label. Gentle Shell infers
 	// the phase from the primary session's tool activity

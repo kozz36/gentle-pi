@@ -1454,6 +1454,7 @@ test("gentle-ai-worker packages the exact scoped writer contract", () => {
 		"status",
 		"summary",
 		"files_changed",
+		"tdd_context",
 		"tdd_evidence",
 		"validation",
 		"risks",
