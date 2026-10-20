@@ -12,9 +12,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 import { domainHashV1 } from "../lib/review-canonical.ts";
 import { canonicalHash } from "../lib/review-transaction.ts";
+import { nativeAdmissionSdk } from "../lib/bash-preexec-admission.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const { createGentleAiExtension } = await import(pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href);
+const { createGentleAiExtension, __testing } = await import(pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href);
 const EXTENSIONS = [
 	"extensions/gentle-ai.ts",
 	"extensions/nan-provider.ts",
@@ -553,8 +554,39 @@ async function run() {
 		const toolHook = hooks.get("tool_call")[0];
 		const toolResultHook = hooks.get("tool_result")[0];
 		const promptHook = hooks.get("before_agent_start")[0];
+		// Policy checks are not native execution. Keep their confirmation carrier
+		// separate so this fixture cannot duplicate the runtime's event listeners.
+		const policyFixture = createPi();
+		const policyLifecycle = __testing.createHerdrConfirmationLifecycle(policyFixture.pi.events);
+		const commandPolicy = (event, ctx) => __testing.confirmCommand(
+			event.input.command, ctx, policyFixture.pi.events, policyLifecycle,
+		);
 		const oddCtx = createCtx(toolCwd, false, "odd-runtime-gate");
 		await promptHook({ systemPrompt: "primary" }, oddCtx);
+		// The real registered hook must refuse unsupported SDKs, or return the
+		// deferred native contract without prompting or executing the command.
+		// Actual dispatcher/process enforcement is tested by the SDK-loader suite.
+		const nativeEffect = join(toolCwd, "native-hook-effect");
+		const nativeCtx = createCtx(toolCwd, true, "native-hook-contract");
+		nativeCtx.ui.confirm = async () => { throw new Error("tool_call must not prompt before native preparation"); };
+		const nativeEventsBefore = emittedEvents.length;
+		const nativeResult = await toolHook({
+			toolName: "bash", input: { command: `printf x > ${JSON.stringify(nativeEffect)}` },
+		}, nativeCtx);
+		if (typeof nativeAdmissionSdk.bindToolExecutionContext !== "function") {
+			assert.deepEqual(nativeResult, {
+				block: true,
+				reason: "Gentle AI requires native final Bash admission support. This action was not run.",
+			}, "unsupported SDKs must fail closed for an otherwise harmless command");
+		} else {
+			assert.deepEqual(Object.keys(nativeResult), ["admission"]);
+			for (const method of ["isValid", "evaluate", "approve"]) {
+				assert.equal(typeof nativeResult.admission[method], "function");
+			}
+			assert.equal(nativeResult.admission.isValid(), true);
+		}
+		assert.equal(existsSync(nativeEffect), false, "hook registration must never execute the pending command");
+		assert.equal(emittedEvents.length, nativeEventsBefore, "early hook admission must not emit confirmation events");
 		const firstOddPath = join(toolCwd, "first.ts");
 		assert.equal(await toolHook({ toolName: "write", input: { path: firstOddPath } }, oddCtx), undefined);
 		await toolResultHook({ toolName: "write", toolCallId: "odd-first", input: { path: firstOddPath }, isError: false }, oddCtx);
@@ -563,7 +595,7 @@ async function run() {
 		const ghPrCwd = await tempWorkspace();
 		try {
 			execFileSync("git", ["init"], { cwd: ghPrCwd, stdio: "ignore" });
-			const deliveryResult = await toolHook(
+			const deliveryResult = await commandPolicy(
 				{ toolName: "bash", input: { command: "gh pr create --draft" } },
 				createCtx(ghPrCwd, true, "ordinary-delivery-session"),
 			);
@@ -571,8 +603,8 @@ async function run() {
 		} finally {
 			await rm(ghPrCwd, { recursive: true, force: true });
 		}
-		assert.equal(await toolHook({ toolName: "bash", input: { command: "git status" } }, createCtx(toolCwd)), undefined);
-		const denied = await toolHook({ toolName: "bash", input: { command: "rm -rf /" } }, createCtx(toolCwd));
+		assert.equal(await commandPolicy({ toolName: "bash", input: { command: "git status" } }, createCtx(toolCwd)), undefined);
+		const denied = await commandPolicy({ toolName: "bash", input: { command: "rm -rf /" } }, createCtx(toolCwd));
 		assert.equal(denied.block, true);
 		assert.match(denied.reason, /destructive/);
 		const reviewDispatch = { agent: "review-risk", task: "review", mode: "task" };
@@ -785,14 +817,14 @@ async function run() {
 		assert.equal(sensitiveEdit.block, true);
 		assert.equal(await toolHook({ toolName: "read", input: { path: join(toolCwd, "src", "index.ts") } }, createCtx(toolCwd)), undefined);
 		const dangerousReviewCtx = createCtx(toolCwd, true, "dangerous-review-session");
-		const needsConfirm = await toolHook(
+		const needsConfirm = await commandPolicy(
 			{ toolName: "bash", input: { command: "git push" } },
 			dangerousReviewCtx,
 		);
 		assert.equal(needsConfirm.block, true);
 		assert.match(needsConfirm.reason, /not confirmed/);
 		assert.deepEqual(
-			emittedEvents.map(({ channel, data }) => ({
+			policyFixture.emittedEvents.map(({ channel, data }) => ({
 				channel,
 				state: data.state,
 				active: data.active,
@@ -826,7 +858,7 @@ async function run() {
 			],
 			"guarded confirmation emits both lifecycle channels in order",
 		);
-		assert.equal(emittedEvents[0].data.requestId, emittedEvents[2].data.requestId);
+		assert.equal(policyFixture.emittedEvents[0].data.requestId, policyFixture.emittedEvents[2].data.requestId);
 		emittedEvents.length = 0;
 		pi.events.emit("rpiv:ask-user:blocked", {
 			active: true,
@@ -854,7 +886,7 @@ async function run() {
 		const commitCwd = await tempWorkspace();
 		try {
 			execFileSync("git", ["init"], { cwd: commitCwd, stdio: "ignore" });
-			const deliveryResult = await toolHook(
+			const deliveryResult = await commandPolicy(
 				{ toolName: "bash", input: { command: "git commit -m bounded tracked.txt" } },
 				createCtx(commitCwd),
 			);
