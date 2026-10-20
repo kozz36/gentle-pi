@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -297,5 +297,176 @@ test("child confirm-class guardrail commands ask the parent instead of running o
 		assert.equal(reason, "Tool execution admission denied");
 		assert.doesNotMatch(reason, /requires interactive confirmation/);
 		assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+	}
+});
+
+// Keep the parent relay and the child RPC implementation real. The only wire
+// taps below are observers: AgentRunner.answer alone sends the UI response.
+test("foreground SDK RPC child waits for the production parent confirmation relay", { skip: process.platform !== "linux", timeout: 60_000 }, async (t) => {
+	// Load runtime consumers only after the helper has registered the SDK alias.
+	const { AgentRunner } = await import("../lib/agents-runner.ts");
+	const { TaskStore } = await import("../lib/agents-protocol.ts");
+	const artifactRoot = process.env.GENTLE_PREEXEC_TEST_ARTIFACT_ROOT ?? tmpdir();
+	const root = realpathSync(mkdtempSync(join(artifactRoot, "child-confirm-ipc-")));
+	// Deliberately retain this run's fixtures and logs for failure diagnosis.
+	const helper = new URL("./support/bash-preexec-fixture.ts", import.meta.url).href;
+	const entry = join(root, "child.mjs");
+	const command = "./pi remove --help";
+	writeFileSync(entry, `
+import { sdk, createGentleAiExtension, fauxProvider, fauxAssistantMessage, fauxToolCall } from ${JSON.stringify(helper)};
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const cwd = process.cwd(), agentDir = process.env.PI_CODING_AGENT_DIR;
+const command = ${JSON.stringify(command)};
+const record = (name, value) => appendFileSync(join(cwd, name), JSON.stringify(value) + '\\n');
+const originalSpawn = cp.spawn;
+cp.spawn = (shell, args, options) => {
+  record('attempts.jsonl', {shell, args, cwd: options?.cwd});
+  // No fallback: anything except this exact harmless local fixture is stopped
+  // categorically before reaching the OS, including initialization surprises.
+  if (!['/bin/bash', '/usr/bin/bash'].includes(shell) ||
+      JSON.stringify(args) !== JSON.stringify(['-c', command]) || options?.cwd !== cwd) {
+    throw new Error('Unexpected native process rejected by IPC fixture');
+  }
+  record('starts.jsonl', {shell, args, cwd: options.cwd});
+  const child = originalSpawn(shell, args, options);
+  writeFileSync(join(cwd, 'bash.stdout'), '');
+  writeFileSync(join(cwd, 'bash.stderr'), '');
+  child.stdout.on('data', chunk => appendFileSync(join(cwd, 'bash.stdout'), chunk));
+  child.stderr.on('data', chunk => appendFileSync(join(cwd, 'bash.stderr'), chunk));
+  child.on('exit', (code, signal) => record('bash-exit.jsonl', {code, signal}));
+  return child;
+};
+syncBuiltinESMExports();
+const settingsManager = sdk.SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false},cacheWarming:'off'});
+const modelRuntime = await sdk.ModelRuntime.create({modelsPath:null,refreshOnCreate:false,allowModelNetwork:false,authPath:join(agentDir,'auth.json')});
+const faux = fauxProvider({provider:'ipc-confirm',tokensPerSecond:Infinity});
+modelRuntime.registerNativeProvider(faux.provider);
+faux.setResponses([fauxAssistantMessage([fauxToolCall('bash',{command})],{stopReason:'toolUse'}), fauxAssistantMessage('done')]);
+const extension = pi => {
+  createGentleAiExtension({processEnv:{...process.env,GENTLE_PI_AGENTS_CHILD:'1',GENTLE_AI_TELEMETRY:'0'},nativeReviewCli:null,candidateViews:null,
+    childStandingReviewPermissionClient:{requestAuthorization:async()=>false,close(){}}})(pi);
+  pi.events.on('pi-permission-system:permission-request', event => record('permissions.jsonl', event));
+};
+const runtime = await sdk.createAgentSessionRuntime(async options => {
+  const services = await sdk.createAgentSessionServices({cwd:options.cwd,agentDir:options.agentDir,settingsManager,modelRuntime,
+    resourceLoaderOptions:{noExtensions:true,noSkills:true,noThemes:true,noPromptTemplates:true,noContextFiles:true,extensionFactories:[extension]}});
+  const result = await sdk.createAgentSessionFromServices({services,sessionManager:options.sessionManager,sessionStartEvent:options.sessionStartEvent,
+    model:faux.getModel(),thinkingLevel:'off',tools:['bash'],customTools:[]});
+  return {...result,services,diagnostics:services.diagnostics};
+},{cwd,agentDir,sessionManager:sdk.SessionManager.inMemory(cwd)});
+await sdk.runRpcMode(runtime);
+`);
+	for (const confirmed of [false, true]) {
+		await t.test(confirmed ? "affirmative reply admits one native start" : "negative reply denies without a native start", async () => {
+			const cwd = join(root, confirmed ? "approved" : "denied");
+			mkdirSync(cwd, { mode: 0o700 });
+			for (const dir of ["agent", "sessions", "config", "cache", "home", "tmp"]) mkdirSync(join(cwd, dir), { mode: 0o700 });
+			const sentinel = join(cwd, "sentinel");
+			writeFileSync(sentinel, "unchanged");
+			// This is an owned harmless executable, not the installed pi CLI. The
+			// existing piRemove policy still legitimately requires confirmation.
+			writeFileSync(join(cwd, "pi"), "#!/bin/sh\n[ \"$1\" = remove ] && [ \"$2\" = --help ] || exit 91\nprintf changed > sentinel\nprintf 'harmless local help\\n'\n");
+			chmodSync(join(cwd, "pi"), 0o700);
+			const rows = (name: string): any[] => existsSync(join(cwd, name))
+				? readFileSync(join(cwd, name), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
+			const asked = Promise.withResolvers<void>(), answer = Promise.withResolvers<{ confirmed: boolean }>();
+			const finished = Promise.withResolvers<any>();
+			const frames: any[] = [], replies: any[] = [], requests: any[] = [];
+			const store = new TaskStore();
+			let launches = 0;
+			const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: 15_000 }, {
+				spawn: (executable, args, options) => {
+					launches++;
+					const child = childProcess.spawn(executable, args, options);
+					let pending = "";
+					child.stdout!.on("data", chunk => {
+						appendFileSync(join(cwd, "child.stdout"), chunk);
+						pending += chunk.toString();
+						let newline: number;
+						while ((newline = pending.indexOf("\n")) >= 0) {
+							const line = pending.slice(0, newline); pending = pending.slice(newline + 1);
+							try { frames.push(JSON.parse(line)); } catch { /* production parser also sees the unchanged bytes */ }
+						}
+					});
+					const write = child.stdin!.write.bind(child.stdin!);
+					child.stdin!.write = ((chunk: any, ...rest: any[]) => {
+						appendFileSync(join(cwd, "parent.stdin"), chunk);
+						const frame = JSON.parse(chunk.toString());
+						if (frame.type === "extension_ui_response") replies.push(frame);
+						return (write as any)(chunk, ...rest);
+					}) as typeof child.stdin.write;
+					child.stderr!.on("data", chunk => appendFileSync(join(cwd, "child.stderr"), chunk));
+					child.on("exit", (code, signal) => writeFileSync(join(cwd, "child.exit"), JSON.stringify({ code, signal })));
+					return child;
+				},
+				now: Date.now,
+				schedule: (fn, ms) => { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); },
+				pi: { command: process.execPath, args: ["--experimental-strip-types", entry] },
+			}, {
+				askUser: async (_id, request, raw) => { requests.push({ request, raw }); asked.resolve(); return answer.promise; },
+				onFinish: task => finished.resolve(task),
+			});
+			const task = runner.run({
+				agent: { name: "ipc-confirm", description: "offline", filePath: entry, scope: "global", instructions: "", model: undefined, thinking: undefined, mode: undefined, tools: ["bash"] },
+				prompt: "Run only the owned harmless local help fixture.", label: undefined, context: undefined, mode: "task", cwd,
+				parentSessionId: "ipc-confirm-parent", model: undefined, thinking: undefined, sessionDir: join(cwd, "sessions"), resumeSessionPath: undefined,
+				noExtensions: true,
+				env: { ...process.env, HOME: join(cwd, "home"), TMPDIR: join(cwd, "tmp"), TMP: join(cwd, "tmp"), TEMP: join(cwd, "tmp"),
+					XDG_CONFIG_HOME: join(cwd, "config"), XDG_CACHE_HOME: join(cwd, "cache"), PI_CODING_AGENT_DIR: join(cwd, "agent"),
+					GENTLE_PI_AGENT_HOME: join(cwd, "agent"), GENTLE_PI_CONFIG_HOME: join(cwd, "config") },
+			});
+			try {
+				await Promise.race([asked.promise, finished.promise.then(value => { throw new Error(`child finished before confirmation: ${JSON.stringify(value)}`); })]);
+				await new Promise(resolve => setTimeout(resolve, 30));
+				assert.equal(requests.length, 1);
+				assert.equal(replies.length, 0, "notification acknowledgements are not confirmation replies");
+				assert.deepEqual(rows("attempts.jsonl"), []);
+				assert.deepEqual(rows("starts.jsonl"), []);
+				for (const name of ["bash.stdout", "bash.stderr", "bash-exit.jsonl"]) assert.equal(existsSync(join(cwd, name)), false);
+				assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+				const raw = requests[0].raw;
+				assert.equal(raw.method, "confirm");
+				assert.match(raw.id, /^[0-9a-f-]{36}$/);
+				assert.ok(raw.message.includes(command));
+				assert.ok(raw.message.includes(cwd));
+				assert.deepEqual(rows("permissions.jsonl").map(event => event.state), ["waiting"]);
+				answer.resolve({ confirmed });
+				const result = await finished.promise;
+				writeFileSync(join(cwd, "task.json"), JSON.stringify(result, null, 2));
+				assert.equal(result.status, "completed");
+				assert.equal(launches, 1);
+				assert.equal(requests.length, 1);
+				assert.deepEqual(replies, [{ type: "extension_ui_response", id: raw.id, confirmed }]);
+				assert.equal(frames.filter(frame => frame.type === "extension_ui_request" && frame.method === "confirm").length, 1);
+				const ends = frames.filter(frame => frame.type === "tool_execution_end" && frame.toolName === "bash");
+				assert.equal(ends.length, 1);
+				assert.equal(ends[0].isError, !confirmed);
+				const text = ends[0].result.content.map((block: any) => block.text ?? "").join("\n");
+				if (confirmed) {
+					assert.equal(text, "harmless local help\n");
+					assert.equal(ends[0].result.structuredContent.output, "harmless local help\n");
+					assert.equal(ends[0].result.structuredContent.exit_code, 0);
+					assert.equal(readFileSync(join(cwd, "bash.stdout"), "utf8"), "harmless local help\n");
+					assert.equal(readFileSync(join(cwd, "bash.stderr"), "utf8"), "");
+					assert.deepEqual(rows("bash-exit.jsonl"), [{ code: 0, signal: null }]);
+				} else {
+					assert.equal(text, "Tool execution admission denied");
+					for (const name of ["bash.stdout", "bash.stderr", "bash-exit.jsonl"]) assert.equal(existsSync(join(cwd, name)), false);
+				}
+				assert.equal(rows("attempts.jsonl").length, confirmed ? 1 : 0);
+				assert.equal(rows("starts.jsonl").length, confirmed ? 1 : 0);
+				assert.equal(readFileSync(sentinel, "utf8"), confirmed ? "changed" : "unchanged");
+				const permissions = rows("permissions.jsonl");
+				assert.deepEqual(permissions.map(event => event.state), ["waiting", confirmed ? "approved" : "denied"]);
+				assert.equal(permissions[0].requestId, permissions[1].requestId);
+				assert.equal(permissions[0].toolName, "bash");
+			} finally {
+				answer.resolve({ confirmed: false });
+				runner.cancel(task.id);
+			}
+		});
 	}
 });
