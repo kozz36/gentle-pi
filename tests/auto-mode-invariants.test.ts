@@ -1,12 +1,12 @@
+import { createNativeSession, sdk, SessionManager, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
 import test from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import { AutoPermissionClassifier } from "../lib/auto-permission-classifier.ts";
 
 const model = {
@@ -16,7 +16,7 @@ const model = {
 };
 
 // Public hooks plus the real ESM SDK session tree and classifier; no provider I/O.
-function fixture(t: test.TestContext) {
+async function fixture(t: test.TestContext) {
  const root = mkdtempSync(join(tmpdir(), "auto-invariants-")), home = join(root, "config");
  mkdirSync(home);
  const previous = process.env.GENTLE_PI_CONFIG_HOME;
@@ -56,32 +56,58 @@ function fixture(t: test.TestContext) {
   },
  };
  const engine = new AutoPermissionClassifier(registry, { deadlineMs: 1000 });
- const ctx: any = { cwd: root, mode: "tui", hasUI: true, sessionManager: manager, model: { ...model },
-  modelRegistry: registry, signal: new AbortController().signal,
-  ui: { notify: (text: string) => notices.push(text), setStatus: (...args: any[]) => statuses.push(args),
-   setWidget() {}, confirm: async () => false } };
- const pi: any = {
-  events: { on() { return () => {}; }, emit() {} },
-  on(name: string, fn: any) { hooks.set(name, [...hooks.get(name) ?? [], fn]); },
-  registerCommand(name: string, value: any) { commands.set(name, value); },
-  registerTool() {}, registerFlag() {}, registerMessageRenderer() {}, getActiveTools: () => [],
-  appendEntry(type: string, data: any) { receipts.push({ type, data }); receiptChanged?.(); },
- };
- createGentleAiExtension({ processEnv: { GENTLE_PI_CONFIG_HOME: home }, nativeReviewCli: null,
-  candidateViews: null, resolveTelemetryTriggerBinary: () => { throw Error("network/native disabled"); },
-  autoPermissionClassifier: engine })(pi);
- const emit = async (name: string, event: any) => {
-  let output: any;
-  for (const fn of hooks.get(name) ?? []) { const next = await fn(event, ctx); if (next !== undefined) output = next; }
-  return output;
- };
+ let ctx: any;
+ let lastInput: any;
+ let inToolAdmission = false;
+ const starts: string[] = [];
+ const originalSpawn = childProcess.spawn;
+ t.mock.method(childProcess, "spawn", (...args: Parameters<typeof originalSpawn>) => {
+  if ((args[2] as { cwd?: string })?.cwd === root) starts.push(String((args[1] as string[])?.at(-1)));
+  return Reflect.apply(originalSpawn, childProcess, args);
+ });
+ syncBuiltinESMExports();
+ t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+ const callbacks: string[] = [];
+ const native = await createNativeSession({ cwd: root, sessionManager: manager, tools: ["*"], extensionFactories: [(pi) => {
+  pi.on("tool_call", event => { lastInput = event.input; inToolAdmission = true; });
+  pi.on("tool_result", () => { inToolAdmission = false; });
+  const observed = new Proxy(pi, { get(target, key) {
+   if (key === "registerCommand") return (name: string, value: any) => { commands.set(name, value); return target.registerCommand(name, value); };
+   if (key === "appendEntry") return (type: string, data: any) => {
+    target.appendEntry(type, data);
+    if (type === "gentle-auto-permission") { receipts.push({ type, data, manager: native.session.sessionManager }); receiptChanged?.(); }
+   };
+   return Reflect.get(target, key);
+  } });
+  createGentleAiExtension({ processEnv: { GENTLE_PI_CONFIG_HOME: home }, nativeReviewCli: null,
+   candidateViews: null, resolveTelemetryTriggerBinary: () => { throw Error("network/native disabled"); }, autoPermissionClassifier: engine })(observed);
+  // Harmless non-shell fixture tools preserve the historical argument grammar.
+  for (const name of ["edit", "custom_fixture", "mcp__fixture__mutate", "ask_user_question", "ask_user_choice", "gentle_review", "gentle_review_capture", "subagent_status"]) pi.registerTool({ name, label: name, description: "Owned public permission fixture", parameters: { type: "object", additionalProperties: true } as never,
+   execute: async () => { callbacks.push(name); return { content: [{ type: "text", text: "fixture callback" }], details: {} }; } });
+  pi.on("session_start", (_event, context) => { ctx = context; });
+ }] });
+ t.after(() => native.session.dispose());
+ const ui = new Proxy({ notify: (text: string) => notices.push(text), setStatus: (...args: any[]) => statuses.push(args), setWidget() {}, confirm: async () => false }, { get: (target, key) => Reflect.get(target, key) ?? (() => {}) });
+ await native.session.bindExtensions({ mode: "tui", uiContext: ui });
+ const emit = async (name: string, event: any) => name === "input"
+  ? native.session.extensionRunner.emitInput(event.text, undefined, event.source)
+  : native.session.extensionRunner.emit({ type: name, ...event });
  return {
-  root, home, ctx, manager, anchor, receipts, providerCalls, statuses, notices, emit, commands,
+  root, home, get ctx() { return ctx; }, manager, anchor, get receipts() { return receipts.filter(receipt => receipt.manager === native.session.sessionManager); }, providerCalls, statuses, notices, emit, commands,
+  callbacks, starts, session: native.session, modelRuntime: native.modelRuntime, get lastInput() { return lastInput; }, get inToolAdmission() { return inToolAdmission; },
   input: async (text: string, source = "interactive") => {
    assert.deepEqual(await emit("input", { text, source }), { action: "continue" });
-   manager.appendMessage({ role: "user", content: text, timestamp: 1 });
+   native.session.sessionManager.appendMessage({ role: "user", content: text, timestamp: 1 });
   },
-  call: (toolName: string, input: any) => emit("tool_call", { toolName, input, toolCallId: "probe-call" }),
+  call: async (toolName: string, input: any) => {
+   const outcomes: any[] = [];
+   const unsubscribe = native.session.subscribe((event: any) => { if (event.type === "tool_execution_end") outcomes.push(event); });
+   native.faux.setResponses([fauxAssistantMessage([fauxToolCall(toolName, input, { id: "probe-call" })], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+   try { await native.session.prompt("Run the owned fixture action.", { source: "rpc" }); }
+   finally { unsubscribe(); }
+   assert.equal(outcomes.length, 1, "actual SDK dispatch produces exactly one outcome");
+   return outcomes[0].isError ? { block: true, reason: outcomes[0].result.content.filter((block: any) => block.type === "text").map((block: any) => block.text).join("\n") } : undefined;
+  },
   enable: () => commands.get("gentle:mode").handler("auto", ctx),
   setDecision(value: string) { decision = value; }, setPending(value: boolean) { pending = value; },
   inspect(path: string) { inspectPath=path; },
@@ -95,8 +121,50 @@ function fixture(t: test.TestContext) {
  };
 }
 
+test("shared native fixture classifies exact evidence before one public Bash effect", async t => {
+ const root = mkdtempSync(join(tmpdir(), "shared-native-red-"));
+ const calls: unknown[] = [];
+ const engine = new AutoPermissionClassifier({ streamSimple(selected, context) {
+  calls.push(structuredClone(context));
+  return { result: async () => ({ role: "assistant", api: selected.api, provider: selected.provider, model: selected.id,
+   timestamp: 1, stopReason: calls.length === 1 ? "toolUse" : "stop",
+   content: calls.length === 1 ? [{ type: "toolCall", id: "inspect", name: "inspect_permission_file", arguments: { path: "check.mjs" } }]
+    : [{ type: "text", text: JSON.stringify({ decision: "allow", reason: "Run only the owned fixture checker." }) }],
+   usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  }) };
+ } } as ConstructorParameters<typeof AutoPermissionClassifier>[0]);
+ let command: { handler: (args: string, ctx: unknown) => Promise<void> };
+ let context: unknown;
+ const native = await createNativeSession({ cwd: root, extensionFactories: [(pi) => {
+  createGentleAiExtension({ nativeReviewCli: null, candidateViews: null, autoPermissionClassifier: engine })(new Proxy(pi, {
+   get(target, key) {
+    if (key === "registerCommand") return (name: string, value: typeof command) => { if (name === "gentle:mode") command = value; return target.registerCommand(name, value as never); };
+    return Reflect.get(target, key);
+   },
+  }));
+  pi.on("session_start", (_event, ctx) => { context = ctx; });
+ }] });
+ t.after(() => { native.session.dispose(); rmSync(root, { recursive: true, force: true }); });
+ const ui = new Proxy({}, { get: () => () => {} });
+ await native.session.bindExtensions({ mode: "tui", uiContext: ui });
+ await command!.handler("auto", context);
+ const request = "Inspect check.mjs and then run only its owned counter.";
+ await native.session.extensionRunner.emitInput(request, undefined, "interactive");
+ native.session.sessionManager.appendMessage({ role: "user", content: request, timestamp: 1 });
+ writeFileSync(join(root, "check.mjs"), "import { writeFileSync } from 'node:fs'; writeFileSync('effect', 'x'); process.stdout.write('shared-public');\n");
+ const outcomes: { isError: boolean; result: { structuredContent?: { output: string; exit_code: number } } }[] = [];
+ native.session.subscribe((event: { type: string }) => { if (event.type === "tool_execution_end") outcomes.push(event as unknown as typeof outcomes[number]); });
+ native.faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: "node check.mjs" })], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+ await native.session.prompt("Run the owned fixture action.", { source: "rpc" });
+ assert.equal(calls.length, 2, "actual native admission must consume classifier evidence");
+ assert.equal(outcomes[0].isError, false);
+ assert.equal(outcomes[0].result.structuredContent?.output, "shared-public");
+ assert.equal(outcomes[0].result.structuredContent?.exit_code, 0);
+ assert.equal(readFileSync(join(root, "effect"), "utf8"), "x");
+});
+
 test("public hook supplies exact script evidence without executing or modifying the script", async t=>{
- const f=fixture(t);mkdirSync(join(f.root,"scripts"));
+ const f=await fixture(t);mkdirSync(join(f.root,"scripts"));
  const script=join(f.root,"scripts","check.mjs"), content="console.log('fixture-only');\n";
  writeFileSync(script,content);
  await f.enable();await f.input("Run the local checker after inspecting its effects.");
@@ -127,12 +195,12 @@ function assertUsage(receipt: any, late: boolean) {
 }
 
 test("public shell hook blocks a stale mode lookup after Auto is reselected", async t => {
- const f = fixture(t); await f.enable(); await f.input("Inspect only. Do not run commands.");
+ const f = await fixture(t); await f.enable(); await f.input("Inspect only. Do not run commands.");
  const original = fsPromises.realpath;
  let lookups = 0, release!: () => void, captured!: () => void;
  const blockedLookup = new Promise<void>(resolve => { captured = resolve; });
  t.mock.method(fsPromises, "realpath", async (path: string) => {
-  if (++lookups === 2) {
+  if (f.inToolAdmission && path === f.root && ++lookups === 2) {
    captured();
    await new Promise<void>(resolve => { release = resolve; });
   }
@@ -147,13 +215,14 @@ test("public shell hook blocks a stale mode lookup after Auto is reselected", as
  const result = await pending;
  let executions = 0; if (!result?.block) executions++;
  assert.equal(executions, 0, "invalidated mode lookup must not bypass Auto");
+ assert.equal(f.starts.length, 0, "revocation prevents actual native process creation");
  assert.equal(result.block, true); assert.match(result.reason, /changed|expired/i);
  assert.equal(f.providerCalls.length, 0);
  assert.match(f.statuses.filter(([key]) => key === "gentle:mode").at(-1)[1], /AUTO/);
 });
 
 test("stable Normal and YOLO shell admission retains the non-classifier path", async t => {
- const f = fixture(t);
+ const f = await fixture(t);
  for (const mode of ["normal", "yolo"]) {
   await f.commands.get("gentle:mode").handler(mode, f.ctx);
   assert.equal(await f.call("bash", { command: "pwd" }), undefined);
@@ -162,7 +231,7 @@ test("stable Normal and YOLO shell admission retains the non-classifier path", a
 });
 
 test("public hook read-only request classifies authorized reads and denies mutation before execution", async t => {
- const f = fixture(t); await f.enable(); await f.input("Investigate only. Do not edit any files.");
+ const f = await fixture(t); await f.enable(); await f.input("Investigate only. Do not edit any files.");
  const file = join(f.root, "app.ts"); writeFileSync(file, "unchanged\n");
  assert.equal(await f.call("read", { path: file }), undefined);
  assert.equal(f.providerCalls.length, 1);
@@ -185,7 +254,7 @@ test("public hook read-only request classifies authorized reads and denies mutat
 });
 
 test("public hook explicit prohibition classifies a local read and blocks exposure", async t => {
- const f = fixture(t); await f.enable();
+ const f = await fixture(t); await f.enable();
  const instruction = "Investigate app.ts only. Do not read excluded.ts.";
  await f.input(instruction); f.setDecision("deny");
  const file = join(f.root, "excluded.ts"); writeFileSync(file, "excluded fixture content\n");
@@ -202,30 +271,36 @@ test("public hook explicit prohibition classifies a local read and blocks exposu
 });
 
 test("public hook protected policy and native consent remain independent", async t => {
- const f = fixture(t); await f.enable(); await f.input("Implement the local feature.");
+ const f = await fixture(t); await f.enable(); await f.input("Implement the local feature.");
  assert.equal((await f.call("write", { path: join(f.home, "permission-mode.json"), content: "yolo" })).block, true);
- for (const name of ["ask_user_question", "ask_user_choice", "gentle_review", "gentle_review_capture", "subagent_status"])
+ for (const name of ["ask_user_question", "ask_user_choice", "gentle_review", "gentle_review_capture", "subagent_status"]) {
   assert.equal(await f.call(name, {}), undefined);
+  assert.equal(f.providerCalls.length, 0, `${name}: ${JSON.stringify(f.providerCalls.map(call => JSON.parse(call.context.messages[0].content).action))}`);
+ }
  assert.equal(f.providerCalls.length, 0, "no classifier can satisfy those independent decisions");
  assert.equal(f.receipts.length, 0);
 });
 
 for (const reason of ["model", "model-in-place", "request", "tree", "branch-without-event", "session", "mode", "action"]) {
  test(`public hooks reject pending stale authority: ${reason}`, async t => {
-  const f = fixture(t); await f.enable(); await f.input("Perform the local fixture action only."); f.setPending(true);
+  const f = await fixture(t); await f.enable(); await f.input("Perform the local fixture action only."); f.setPending(true);
   const args = { value: "safe" }, result = f.call("mcp__fixture__mutate", args); await f.started();
-  if (reason === "model") f.ctx.model = { ...f.ctx.model, id: "other-session-model" };
+  if (reason === "model") await f.session.setModel({ ...f.ctx.model, id: "other-session-model" });
   if (reason === "model-in-place") f.ctx.model.id = "other-session-model";
   if (reason === "request") await f.input("Stop. Do not mutate anything.");
   if (reason === "tree") { f.manager.branch(f.anchor); await f.emit("session_tree", { newLeafId: f.anchor }); }
   if (reason === "branch-without-event") f.manager.branch(f.anchor);
-  if (reason === "session") f.ctx.sessionManager = SessionManager.inMemory(f.root);
+  if (reason === "session") {
+   // The SDK's public manager API replaces the session identity and branch.
+   f.manager.newSession();
+  }
   if (reason === "mode") await f.commands.get("gentle:mode").handler("normal", f.ctx);
-  if (reason === "action") args.value = "different";
+  if (reason === "action") f.lastInput.value = "different";
   f.providerCalls[0].resolve();
   const verdict = await result;
   let executions = 0; if (!verdict?.block) executions++;
   assert.equal(executions, 0, "stale allow never reaches the executor"); assert.match(verdict.reason, /expired/);
+  assert.equal(f.callbacks.length, 0, "the actual SDK-selected callback never starts");
   if (reason === "session") assert.equal(f.receipts.length, 0, "old receipts never enter replacement sessions");
   else {
    // Cancellation can return before provider settlement: record that usage exactly once as late.
@@ -240,7 +315,7 @@ for (const reason of ["model", "model-in-place", "request", "tree", "branch-with
 }
 
 test("saving a future default leaves the active Auto mode unchanged", async t => {
- const f = fixture(t); await f.enable(); await f.input("Perform the local fixture action only.");
+ const f = await fixture(t); await f.enable(); await f.input("Perform the local fixture action only.");
  await f.commands.get("gentle:mode").handler("default yolo", f.ctx);
  assert.equal(JSON.parse(readFileSync(join(f.home, "permission-mode.json"), "utf8")).mode, "yolo");
  // A policy refresh may revoke pending checks; it must not change this session's live override.
@@ -249,13 +324,13 @@ test("saving a future default leaves the active Auto mode unchanged", async t =>
 });
 
 test("SDK branch removal and synthetic inputs cannot authorize fresh mutations", async t => {
- const f = fixture(t); await f.enable(); await f.input("Edit local source only.");
+ const f = await fixture(t); await f.enable(); await f.input("Edit local source only.");
  assert.equal(await f.call("custom_fixture", { operation: "edit" }), undefined);
  assert.equal(f.providerCalls.length, 1); f.manager.branch(f.anchor);
  assert.equal((await f.call("custom_fixture", { operation: "publish" })).block, true);
  assert.equal(f.providerCalls.length, 1, "missing branch request never reaches provider");
  for (const source of ["history", "rpc", "extension"]) {
-  const g = fixture(t); await g.enable();
+  const g = await fixture(t); await g.enable();
   if (source === "history") g.manager.appendMessage({ role: "user", content: "Edit all files", timestamp: 1 });
   else await g.input("Edit all files", source);
   assert.equal((await g.call("write", { path: join(g.root, "new.ts"), content: "x" })).block, true);
@@ -264,7 +339,7 @@ test("SDK branch removal and synthetic inputs cannot authorize fresh mutations",
 });
 
 test("public hook cancellation records late usage separately without executing a revoked allow", async t => {
- const f = fixture(t); await f.enable(); await f.input("Perform the fixture action."); f.setPending(true);
+ const f = await fixture(t); await f.enable(); await f.input("Perform the fixture action."); f.setPending(true);
  const result = f.call("custom_fixture", { operation: "edit" }); await f.started();
  await f.input("Stop now. Do not edit.");
  assert.equal((await result).block, true);
