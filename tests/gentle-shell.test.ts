@@ -4715,6 +4715,44 @@ test("Changes lists the session root's Git state at turn end, never at startup",
  await fire(handlers,"session_shutdown",ctx);
 });
 
+test("fullscreen digests exclude large per-file Git payloads but retain aggregate changes", async () => {
+	const paths = Array.from({ length: 1000 }, (_, i) => `synthetic-unrendered-file-${i}.ts`);
+	const { pi, handlers } = fakePi([
+		{ numstat: paths.map((path) => `2\t0\t${path}\n`).join(""), porcelain: paths.map((path) => ` M ${path}\0`).join("") },
+		{ numstat: paths.map((path) => `3\t0\t${path}\n`).join(""), porcelain: paths.map((path) => ` M ${path}\0`).join("") },
+	]);
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" });
+	const { ctx, ui } = fakeContext();
+	await fire(handlers, "session_start", ctx);
+	const NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
+	const root = { render: () => ["transcript"], invalidate() {}, [NODE]: () => ({ type: "vstack", entries: [] }) };
+	const tui = { mode: "fullscreen", terminal: { rows: 40, columns: 160 }, layoutRoot: root, requestRender() {} };
+	const factory = ui.footerFactory as (tui: unknown, theme: ShellBarTheme, data: unknown) => { dispose(): void };
+	const component = factory(tui, plainTheme, footerData);
+	try {
+		await fire(handlers, "agent_end", ctx);
+		await changesSettled();
+		const parts = sidebarState(tui as unknown as TUI).parts;
+		const footer = parts.get("footer")!;
+		const header = parts.get("header")!;
+		const before = footer.digest!();
+		for (const part of [footer, header]) {
+			assert.doesNotMatch(part.digest!(), /synthetic-unrendered-file/, "polling never serializes unpainted file detail");
+			assert.ok(part.digest!().length < 10_000, "digest cost stays independent of per-file payload size");
+		}
+		assert.equal(root[NODE]().type, "vstack", "public fullscreen layout includes the header");
+		assert.match(footer.render(46).join("\n"), /1000 files · \+2000 −0/);
+		assert.doesNotMatch(header.render(160).join("\n"), /synthetic-unrendered-file/);
+		await fire(handlers, "agent_end", ctx);
+		await changesSettled();
+		assert.notEqual(footer.digest!(), before);
+		assert.match(footer.render(46).join("\n"), /1000 files · \+3000 −0/);
+	} finally {
+		component.dispose();
+		await fire(handlers, "session_shutdown", ctx);
+	}
+});
+
 test("committed work leaves the widget and the footer counter at the next turn end", async () => {
  const { handlers, git, pi } = fakePi([{numstat:"1\t0\tlib/b.ts\n",porcelain:" M lib/b.ts\0"},{numstat:"",porcelain:""}]);
  gentleShell(pi,{});

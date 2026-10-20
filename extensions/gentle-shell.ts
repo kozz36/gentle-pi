@@ -1960,7 +1960,8 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				},
 			};
 			const part = sidebarPart(tui, "footer", bottomBar, {
-				digest: () => JSON.stringify([footerModel(), tracker.model, visualSettings, cardStyle()]),
+				// Only aggregate Changes fields are painted here, not per-file Git data.
+				digest: () => JSON.stringify([footerModel(), visualSettings, cardStyle()]),
 				render: (width) => renderShellSidebarBar(footerModel(), theme, width, visualSettings),
 				invalidate() {},
 			});
@@ -1969,7 +1970,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			// when Status is absent. Opaque statuses and working state stay excluded.
 			const headerBar = (width: number) => renderShellHeaderChrome(buildShellHeaderModel(footerModel(), !statusCardVisible() && (statusOwner() === STATUS_OWNER.HEADER || visualSettings.statusPlacement === "hidden")), theme, width, usageShortcutKey, visualSettings, gaugePaint(ctx));
 			const disposeHeader = sidebarHeader(tui, {
-				digest: () => JSON.stringify([footerModel(), tracker.model, visualSettings, cardStyle()]),
+				digest: () => JSON.stringify([footerModel(), visualSettings, cardStyle()]),
 				render: (width) => headerBar(width).rows,
 				invalidate() {},
 				handleMouse(event) {

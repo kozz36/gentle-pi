@@ -73,6 +73,34 @@ test("scrollable TODO keeps every task while bottom and collapsed cards stay bou
 	assert.ok(!render(true, true).includes("Task-20!"));
 });
 
+test("each prepare polls a large live section once and reuses unchanged rendered output", (t) => {
+	const f = fixture();
+	const payload = { rows: Array.from({ length: 2000 }, (_, i) => `synthetic-${i}`), status: "ready" };
+	let polls = 0;
+	let renders = 0;
+	sidebarPart(f.tui, "footer", { render: () => [], invalidate() {} }, {
+		digest: () => { polls++; return JSON.stringify(payload); },
+		render: () => { renders++; return [payload.status]; },
+		invalidate() {},
+	});
+	t.after(installSidebar(f.tui, theme));
+	const output = () => rail(f).render(50).join("\n");
+	assert.match(output(), /ready/);
+	assert.equal(polls, 1, "one expensive snapshot per prepare, including a cache miss");
+	assert.equal(renders, 1);
+	assert.match(output(), /ready/);
+	assert.equal(polls, 2, "cache hits must still poll mutable provider state");
+	assert.equal(renders, 1, "unchanged content reuses rendered lines");
+	payload.status = "updated";
+	assert.match(output(), /updated/);
+	assert.equal(polls, 3);
+	assert.equal(renders, 2, "in-place changes remain visible without explicit invalidation");
+	invalidateSidebar(f.tui);
+	assert.match(output(), /updated/);
+	assert.equal(polls, 4);
+	assert.equal(renders, 2, "a digest-backed section survives unrelated revision changes");
+});
+
 test("installation on a missing-terminal host is a harmless no-op", () => {
 	const dispose = installSidebar({} as TUI, theme);
 	assert.doesNotThrow(dispose);

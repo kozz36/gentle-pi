@@ -218,6 +218,9 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme, placement: () => 
 		const style = cardStyle();
 		const parts = [...state.parts.entries()];
 		const digests = parts.map(([, rail]) => railDigest(rail));
+		// Reuse this pass's live snapshot when preparing sections below. Polling
+		// twice wastes serialization and can compare/store different provider state.
+		const sectionDigests = new Map(parts.map(([key], index) => [key, digests[index]]));
 		const unchanged = prepared?.revision === cache.revision &&
 			prepared.width === width && prepared.mode === host.mode && prepared.headerPlacement === headerPlacement() && prepared.cardStyle === style && prepared.root === root && prepared.theme === theme &&
 			prepared.parts.length === parts.length && prepared.parts.every(([key, part], index) => parts[index]?.[0] === key && parts[index]?.[1] === part) &&
@@ -241,7 +244,7 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme, placement: () => 
 					sectionCache.delete(key);
 					return { key, component, lines: [] as string[] };
 				}
-				const digest = railDigest(component);
+				const digest = sectionDigests.get(key);
 				const existing = sectionCache.get(key);
 				const reusable = existing?.component === component && existing.contentWidth === contentWidth && existing.theme === theme &&
 					(digest !== undefined ? existing.digest === digest : existing.digest === undefined && existing.revision === cache.revision);
