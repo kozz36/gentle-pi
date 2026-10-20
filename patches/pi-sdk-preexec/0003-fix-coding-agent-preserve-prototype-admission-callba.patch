@@ -1,0 +1,154 @@
+From c482faa364e5937bade5f68648bc224e58f42178 Mon Sep 17 00:00:00 2001
+From: Kozz36 <vjose8506@gmail.com>
+Date: Mon, 19 Oct 2026 19:00:23 -0500
+Subject: [PATCH 3/4] fix(coding-agent): preserve prototype admission callbacks
+ and receivers
+
+Pin isValid, optional evaluate and approve to the original policy.
+Do not let object spread discard a prototype DENY or lose its receiver.
+Keep public class-policy denial and harmless execution calibration tests.
+
+Native finding: R3-policy-prototype (review-56fc16af5f554e81).
+Observed RED: two public class-policy regressions failed before the fix;
+the denied policy approved and started one harmless owned process.
+Final focused self-check, independent check and parent spot check each
+passed 42 tests. Read-only types passed; correction is 100 diff lines.
+The first post-fix 41/42 attempt is retained: only a new expected error
+literal was corrected to the existing final-policy denial message.
+
+Native targeted validation remains pending; no approval is implied.
+GP global remains RED; consultation causality remains UNKNOWN.
+No host activation, publication, global install, or P01 operation.
+
+Risk: item 2 (authorization denial precedence and original receivers).
+---
+ .../src/core/extensions/runner.ts             |  9 +-
+ .../test/bash-preexec-admission.test.ts       | 91 +++++++++++++++++++
+ 2 files changed, 99 insertions(+), 1 deletion(-)
+
+diff --git a/packages/coding-agent/src/core/extensions/runner.ts b/packages/coding-agent/src/core/extensions/runner.ts
+index ef3ed22b66bb0626b89edfa21d75744e2ad9013b..70f899b7b1fe17bf65e45e64b527bc7b404d89a5 100644
+--- a/packages/coding-agent/src/core/extensions/runner.ts
++++ b/packages/coding-agent/src/core/extensions/runner.ts
+@@ -1258,7 +1258,14 @@ export class ExtensionRunner {
+ 
+ 				if (handlerResult) {
+ 					result = handlerResult as ToolCallEventResult;
+-					if (result.admission) admissions.push({ ...result.admission });
++					if (result.admission) {
++						const admission = result.admission;
++						admissions.push({
++							isValid: admission.isValid.bind(admission),
++							evaluate: admission.evaluate?.bind(admission),
++							approve: admission.approve.bind(admission),
++						});
++					}
+ 					if (result.block) {
+ 						return result;
+ 					}
+diff --git a/packages/coding-agent/test/bash-preexec-admission.test.ts b/packages/coding-agent/test/bash-preexec-admission.test.ts
+index dba25dd9fd0d5da7742da2ad8a6b26c1b2143882..16cfef8be7264507260964c3ff4d8290cee9c91d 100644
+--- a/packages/coding-agent/test/bash-preexec-admission.test.ts
++++ b/packages/coding-agent/test/bash-preexec-admission.test.ts
+@@ -6,6 +6,8 @@ import {
+ } from "@earendil-works/pi-agent-core";
+ import type { AssistantMessage } from "@earendil-works/pi-ai";
+ import * as childProcess from "child_process";
++import { existsSync, mkdtempSync, readFileSync } from "node:fs";
++import { join } from "node:path";
+ import { afterEach, expect, it, vi } from "vitest";
+ import { ExtensionRunner } from "../src/core/extensions/runner.ts";
+ import type {
+@@ -557,3 +559,92 @@ it("preserves the shared sibling shell backend without an admission requirement"
+ 	expect(result.exitCode).toBe(0);
+ 	expect(output).toBe("sibling");
+ });
++
++it.each(["deny", "confirm"] as const)("preserves class policy prototypes and receivers: %s", async (decision) => {
++	const spawn = vi.mocked(childProcess.spawn);
++	const effect = join(mkdtempSync(join(cwd, "policy-class-")), "effect");
++	const command = `printf prototype; printf x > ${JSON.stringify(effect)}`;
++	const validReceivers: unknown[] = [],
++		evaluations: Array<{ receiver: unknown; plan: unknown }> = [],
++		approvals: unknown[] = [];
++	const marker = Symbol("original policy instance");
++	class PrototypePolicy implements ToolExecutionAdmission {
++		private readonly marker = marker;
++		isValid() {
++			validReceivers.push(this);
++			return this.marker === marker;
++		}
++		evaluate(plan: unknown) {
++			evaluations.push({ receiver: this, plan });
++			return decision;
++		}
++		async approve() {
++			approvals.push(this);
++			return this.marker === marker;
++		}
++	}
++	class DenyingPolicy extends PrototypePolicy {
++		override isValid = () => super.isValid();
++		override approve = async () => super.approve();
++	}
++	const policy = decision === "deny" ? new DenyingPolicy() : new PrototypePolicy();
++	const definition = createToolDefinitionFromAgentTool(fixture().tool);
++	const registered: RegisteredTool = {
++		definition,
++		sourceInfo: { path: "<test:class-policy>", source: "test", scope: "temporary", origin: "top-level" },
++	};
++	const extension = {
++		handlers: new Map([["tool_call", [async () => ({ admission: policy })]]]),
++		tools: new Map([["bash", registered]]),
++	} as unknown as Extension;
++	const runner = new ExtensionRunner(
++		[extension],
++		{ invalidate: () => {} } as unknown as ExtensionRuntime,
++		cwd,
++		{} as SessionManager,
++		{} as ModelRegistry,
++	);
++	runner.setUIContext({ confirm: async () => true } as unknown as ExtensionUIContext, "tui");
++	const tool = wrapRegisteredTool(registered, runner);
++	const outcome = await runToolCall(
++		{ type: "toolCall", id: "prototype", name: "bash", arguments: { command } },
++		{
++			tools: [tool],
++			context: { messages: [], tools: [tool] },
++			assistantMessage,
++			beforeToolCall: async () =>
++				runner.emitToolCall({
++					type: "tool_call",
++					toolName: "bash",
++					toolCallId: "prototype",
++					input: { command },
++				}) as Promise<ToolCallEventResult | undefined>,
++		},
++	);
++	const denied = decision === "deny";
++	const spawned = spawn.mock.results[0];
++	expect({
++		isError: outcome.isError,
++		evaluations: evaluations.length,
++		approvals: approvals.length,
++		starts: spawn.mock.calls.length,
++		exitCode: spawned?.type === "return" ? spawned.value.exitCode : null,
++		content: outcome.result.content,
++		effect: existsSync(effect) ? readFileSync(effect, "utf8") : null,
++		validityCalled: validReceivers.length > 0,
++		receiversPreserved: [...validReceivers, ...evaluations.map((row) => row.receiver), ...approvals].every(
++			(value) => value === policy,
++		),
++	}).toEqual({
++		isError: denied,
++		evaluations: 1,
++		approvals: denied ? 0 : 1,
++		starts: denied ? 0 : 1,
++		exitCode: denied ? null : 0,
++		content: [{ type: "text", text: denied ? "Final execution policy denied" : "prototypehooked" }],
++		effect: denied ? null : "x",
++		validityCalled: true,
++		receiversPreserved: true,
++	});
++	expect(evaluations[0].plan).toMatchObject({ command: `# prefix\n${command}\nprintf hooked`, cwd });
++});

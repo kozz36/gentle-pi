@@ -1,0 +1,1146 @@
+From f209f2668bae614411ff03079f82dd58c7f77334 Mon Sep 17 00:00:00 2001
+From: Kozz36 <vjose8506@gmail.com>
+Date: Mon, 19 Oct 2026 18:29:21 -0500
+Subject: [PATCH 2/4] feat(coding-agent): admit prepared Bash plans before
+ native process creation
+
+Bind real executor delegates through registered extension wrappers.
+Evaluate the immutable final shell plan before spawning, retaining hard
+blocks, configured confirmation, cancellation and context-loss rejection.
+Keep native admission tests and SDK documentation with the gate.
+
+Retained evidence: SDK scoped 172 tests plus the independent public
+session-generation probe passed on the final candidate; no new campaign
+or execution of this intermediate repository snapshot is claimed.
+The live AgentSession merged-owner integration follows separately.
+GP global remains RED and consultation causality remains UNKNOWN.
+No host activation, publication, global install or P01 operation.
+
+Risk: items 2 and 4 (authorization and invocation/concurrency isolation).
+---
+ packages/coding-agent/docs/sdk.md             |  72 +++
+ .../src/core/extensions/runner.ts             |  31 +-
+ .../coding-agent/src/core/extensions/types.ts |   6 +
+ .../src/core/extensions/wrapper.ts            |  34 +-
+ packages/coding-agent/src/core/tools/bash.ts  | 121 +++-
+ .../src/core/tools/tool-definition-wrapper.ts |  43 +-
+ packages/coding-agent/src/index.ts            |   8 +
+ .../test/bash-preexec-admission.test.ts       | 559 ++++++++++++++++++
+ 8 files changed, 849 insertions(+), 25 deletions(-)
+ create mode 100644 packages/coding-agent/test/bash-preexec-admission.test.ts
+
+diff --git a/packages/coding-agent/docs/sdk.md b/packages/coding-agent/docs/sdk.md
+index 7d0883b3ff7926c077414ccce9b4f7aa31f7065b..91b4de6d6e127101a22737106fdc36791c4bb985 100644
+--- a/packages/coding-agent/docs/sdk.md
++++ b/packages/coding-agent/docs/sdk.md
+@@ -117,6 +117,78 @@ The CLI loads `codemode`, `tool_search`, and MCP as built-in extensions. SDK ses
+ 
+ See the focused examples for [models](../examples/sdk/02-custom-model.ts), [tools](../examples/sdk/05-tools.ts), [extensions](../examples/sdk/06-extensions.ts), and [full control](../examples/sdk/12-full-control.ts).
+ 
++## Final local Bash admission
++
++SDK-created standard-local Bash definitions support dispatcher-requested admission,
++including the **original configured default** inside `createAgentSession()`. Return
++an admission requirement from the hook; do not replace that owner or reconstruct its
++captured shell/prefix/options. Capability follows its actual execute function and
++`createLocalBashOperations()` backend, not its name or metadata. Custom/opaque
++backends remain unsupported and are rejected before invocation when admission is requested.
++
++`requireAdmission: true` is a separate, stricter direct-call rule. It is not needed
++to make the canonical default eligible:
++
++| Call | Default factory | `requireAdmission: true` |
++|---|---|---|
++| Ordinary direct/legacy call without admission context | Allowed, before and after guarded use of the same instance | Rejected |
++| Dispatched call requiring admission | Final policy/gate required | Final policy/gate required |
++| Guarded forwarding call losing or substituting context | Rejected before backend effects | Rejected before backend effects |
++
++There is no sticky activation or factory mode change. Existing options/backend
++instances, legacy four-argument AgentTool calls and receivers remain intact.
++
++A host `beforeToolCall` hook, or extension `tool_call` handler, returns
++`{ admission: { isValid, evaluate, approve } }` for **every invocation** on the guarded
++path, not only raw commands already classified unsafe. This is a requirement, not
++an allow decision. `isValid(): boolean` must compare captured policy/session
++generations with current ones. Optional `evaluate(plan, presentationContext)` runs
++final policy and returns `"allow"`, `"deny"`, or `"confirm"` (synchronously or asynchronously).
++`"allow"` permits a safe final plan without UI; `"deny"` starts no process and never
++asks for confirmation. Omission means `"confirm"`.
++`approve(plan: unknown, presentationContext?: unknown): Promise<boolean>` must return
++exactly `true` for a fresh affirmative decision when final policy requires confirmation. The native local Bash gate supplies
++an immutable `LocalBashExecutionPlan` and this invocation's `ExtensionToolContext`.
++The plan includes final command, cwd, effective timeout in milliseconds, shell,
++argv and command transport, after prefix/spawnHook/backend preparation. It omits
++environment values; do not display secrets in confirmation UI.
++
++Confirmation requires dialog-capable UI. Pending, denied, missing required UI, thrown decisions,
++cancellation, stale policy/session/registry, replaced executor/backend, and changed
++prepared values start no process. One affirmative decision admits one captured
++invocation. Concurrent calls and reused textual IDs do not share decisions.
++
++### Presentation wrappers
++
++`bindToolExecutionContext(wrapperExecute, delegateExecute, isValid): void` binds a
++known forwarding function to its exact native delegate. Both arguments are function
++objects, never tool names, ToolInfo, schema markers, or model arguments. A wrapper
++must forward the fifth AgentTool argument unchanged; definition wrappers forward
++`ctx.toolExecutionContext` on the extension context. Bind each forwarding layer,
++and make `isValid` check that its actual delegate is still the captured function.
++SDK definition/registered wrappers bind themselves and preserve lazy UI/session
++context getters. Unknown or replaced functions are rejected before invocation.
++
++The dispatcher enters an actual-function-bound native invocation scope **before**
++forwarders run. Standard-local Bash compares that lifecycle scope with the explicitly
++forwarded context. Missing or mismatched context rejects before the backend; Bash
++does not retrieve a lost frame from ambient storage to approve the call. The final
++prepared-plan gate still uses only the explicitly forwarded frame.
++
++Every dispatched legacy/non-admission call enters an explicit undefined native
++scope, including nested unbound executors. Native async-local isolation restores
++the caller's scope on return/error/cancellation and keeps concurrent reused IDs
++independent. Outside guarded execution, direct calls on the same default instance
++remain legacy calls; no global approval ledger or transferable consent is created.
++Agent-core invokes native scope hooks without depending on Node; only local Bash
++uses Node async-local storage. Native backend registration may supply that optional
++scope runner; it is privileged lifecycle plumbing, not a GP capability shortcut.
++
++Binding does not make arbitrary forwarding code safe. Native extension code is
++privileged; it can spawn processes itself. This contract is **not a sandbox** against
++malicious native extensions, nor does it approve `user_bash`, `pi.exec`, or arbitrary
++custom operations. Hard-block hooks retain precedence over admission requests.
++
+ ## Examples
+ 
+ | Example | Purpose |
+diff --git a/packages/coding-agent/src/core/extensions/runner.ts b/packages/coding-agent/src/core/extensions/runner.ts
+index 77712e677f91dde65d4d4db906a26b16bbd9de9c..ef3ed22b66bb0626b89edfa21d75744e2ad9013b 100644
+--- a/packages/coding-agent/src/core/extensions/runner.ts
++++ b/packages/coding-agent/src/core/extensions/runner.ts
+@@ -2,7 +2,7 @@
+  * Extension runner - executes extensions and manages their lifecycle.
+  */
+ 
+-import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
++import type { AgentMessage, AgentTool, ToolExecutionAdmission } from "@earendil-works/pi-agent-core";
+ import {
+ 	getCurrentSystemMessage,
+ 	type ImageContent,
+@@ -1248,6 +1248,8 @@ export class ExtensionRunner {
+ 
+ 	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
+ 		const ctx = this.createContext();
++		const ui = this.uiContext;
++		const admissions: ToolExecutionAdmission[] = [];
+ 		let result: ToolCallEventResult | undefined;
+ 
+ 		for (const { handlers } of snapshotEventHandlers(this.extensions, "tool_call")) {
+@@ -1256,6 +1258,7 @@ export class ExtensionRunner {
+ 
+ 				if (handlerResult) {
+ 					result = handlerResult as ToolCallEventResult;
++					if (result.admission) admissions.push({ ...result.admission });
+ 					if (result.block) {
+ 						return result;
+ 					}
+@@ -1263,6 +1266,32 @@ export class ExtensionRunner {
+ 			}
+ 		}
+ 
++		if (admissions.length) {
++			const confirmations: ToolExecutionAdmission[] = [];
++			return {
++				...result,
++				admission: {
++					isValid: () => {
++						this.assertActive();
++						return this.uiContext === ui && admissions.every((admission) => admission.isValid());
++					},
++					evaluate: async (plan, presentationContext) => {
++						for (const admission of admissions) {
++							const decision = await (admission.evaluate?.(plan, presentationContext) ?? "confirm");
++							if (decision === "confirm") confirmations.push(admission);
++							else if (decision !== "allow") return "deny";
++						}
++						return confirmations.length ? "confirm" : "allow";
++					},
++					approve: async (plan, presentationContext) => {
++						for (const admission of confirmations) {
++							if ((await admission.approve(plan, presentationContext)) !== true) return false;
++						}
++						return true;
++					},
++				},
++			};
++		}
+ 		return result;
+ 	}
+ 
+diff --git a/packages/coding-agent/src/core/extensions/types.ts b/packages/coding-agent/src/core/extensions/types.ts
+index 60388c0eb6ddc8c46fd44191b7d872a14a53decd..d1581858ec4dfd59272b67b1e242f85d48ea8ffa 100644
+--- a/packages/coding-agent/src/core/extensions/types.ts
++++ b/packages/coding-agent/src/core/extensions/types.ts
+@@ -15,6 +15,8 @@ import type {
+ 	AgentToolResult,
+ 	AgentToolUpdateCallback,
+ 	ThinkingLevel,
++	ToolExecutionAdmission,
++	ToolExecutionContext,
+ 	ToolExecutionMode,
+ } from "@earendil-works/pi-agent-core";
+ import type {
+@@ -323,6 +325,8 @@ export interface CompactOptions {
+ export type ExtensionMode = "tui" | "rpc" | "json" | "print";
+ 
+ export interface ExtensionContext {
++	/** Host-created state for this execution only; never derive it from model input. */
++	readonly toolExecutionContext?: ToolExecutionContext;
+ 	/** UI methods for user interaction */
+ 	ui: ExtensionUIContext;
+ 	/** Current run mode. Use "tui" to guard terminal-only UI such as custom components. */
+@@ -1452,6 +1456,8 @@ export type BeforeProviderRequestEventResult = unknown;
+ export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.ts";
+ 
+ export interface ToolCallEventResult {
++	/** Require final local admission; unsupported actual executors fail before invocation. */
++	admission?: ToolExecutionAdmission;
+ 	/** Block tool execution. To modify arguments, mutate `event.input` in place instead. */
+ 	block?: boolean;
+ 	reason?: string;
+diff --git a/packages/coding-agent/src/core/extensions/wrapper.ts b/packages/coding-agent/src/core/extensions/wrapper.ts
+index 3d9399c2b0371bab48e62c51d427736c55d52616..acc04dca0171517b8c78d5f2560558a655305ed6 100644
+--- a/packages/coding-agent/src/core/extensions/wrapper.ts
++++ b/packages/coding-agent/src/core/extensions/wrapper.ts
+@@ -5,7 +5,7 @@
+  * Tool call and tool result interception is handled by AgentSession via agent-core hooks.
+  */
+ 
+-import type { AgentTool } from "@earendil-works/pi-agent-core";
++import { type AgentTool, bindToolExecutionContext } from "@earendil-works/pi-agent-core";
+ import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
+ import type { ExtensionRunner } from "./runner.ts";
+ import type { RegisteredTool } from "./types.ts";
+@@ -15,9 +15,28 @@ import type { RegisteredTool } from "./types.ts";
+  * Uses the runner's createToolContext() for consistent context across tools and event handlers.
+  */
+ export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: ExtensionRunner): AgentTool {
+-	return wrapToolDefinition(registeredTool.definition, (toolCallId, signal) =>
+-		runner.createToolContext(toolCallId, signal),
++	return wrapRegisteredToolWithOwner(registeredTool, runner, (name) => runner.getToolDefinition(name));
++}
++
++function wrapRegisteredToolWithOwner(
++	registeredTool: RegisteredTool,
++	runner: ExtensionRunner,
++	getCurrentDefinition: (name: string) => RegisteredTool["definition"] | undefined,
++): AgentTool {
++	const definition = registeredTool.definition;
++	const name = definition.name;
++	const delegate = definition.execute;
++	const tool = wrapToolDefinition(definition, (toolCallId, signal) => runner.createToolContext(toolCallId, signal));
++	bindToolExecutionContext(
++		tool.execute,
++		delegate,
++		() =>
++			registeredTool.definition === definition &&
++			definition.name === name &&
++			definition.execute === delegate &&
++			getCurrentDefinition(name) === definition,
+ 	);
++	return tool;
+ }
+ 
+ /**
+@@ -27,3 +46,12 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: Exten
+ export function wrapRegisteredTools(registeredTools: RegisteredTool[], runner: ExtensionRunner): AgentTool[] {
+ 	return registeredTools.map((tool) => wrapRegisteredTool(tool, runner));
+ }
++
++/** @internal AgentSession supplies its live merged registry; not re-exported by the public SDK. */
++export function wrapRegisteredToolsWithOwner(
++	registeredTools: RegisteredTool[],
++	runner: ExtensionRunner,
++	getCurrentDefinition: (name: string) => RegisteredTool["definition"] | undefined,
++): AgentTool[] {
++	return registeredTools.map((tool) => wrapRegisteredToolWithOwner(tool, runner, getCurrentDefinition));
++}
+diff --git a/packages/coding-agent/src/core/tools/bash.ts b/packages/coding-agent/src/core/tools/bash.ts
+index 4620e24648b6ba9e8aa4f5083eb99927549ebcaa..58a63e13d7d7735ac35ab0364f90ba421244e11a 100644
+--- a/packages/coding-agent/src/core/tools/bash.ts
++++ b/packages/coding-agent/src/core/tools/bash.ts
+@@ -1,7 +1,13 @@
++import { AsyncLocalStorage } from "node:async_hooks";
+ import { constants } from "node:fs";
+ import { access as fsAccess } from "node:fs/promises";
+ import { constants as osConstants } from "node:os";
+-import type { AgentTool } from "@earendil-works/pi-agent-core";
++import {
++	type AgentTool,
++	bindToolExecutionContext,
++	registerToolExecutionContext,
++	type ToolExecutionContext,
++} from "@earendil-works/pi-agent-core";
+ import { spawn } from "child_process";
+ import { type Static, Type } from "typebox";
+ import { waitForChildProcess } from "../../utils/child-process.ts";
+@@ -19,6 +25,12 @@ import { BASH_UPDATE_THROTTLE_MS, createShellRenderers } from "./renderers/bash.
+ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
+ 
++// One stable carrier hook is shared by all local executors. It holds lifecycle
++// context only; decisions remain private to each host-created invocation frame.
++const localInvocation = new AsyncLocalStorage<ToolExecutionContext | undefined>();
++const localInvocationScope = <T>(context: ToolExecutionContext | undefined, invoke: () => Promise<T>): Promise<T> =>
++	localInvocation.run(context, invoke);
++
+ const MAX_TIMEOUT_MS = 2_147_483_647;
+ /** Output limit of `structuredContent.output`, which programmatic callers such as codemode scripts receive. */
+ const STRUCTURED_OUTPUT_MAX_BYTES = 1024 * 1024;
+@@ -89,14 +101,25 @@ export interface BashOperations {
+ 			signal?: AbortSignal;
+ 			timeout?: number;
+ 			env?: NodeJS.ProcessEnv;
++			/** Native per-invocation admission; custom operations are not implicitly supported. */
++			executionContext?: ToolExecutionContext;
++			presentationContext?: ExtensionContext;
++			/** @internal Revalidate the retained spawn-hook plan after admission. */
++			isPlanCurrent?: () => boolean;
+ 		},
+ 	) => Promise<{ exitCode: number | null }>;
+ }
+ 
+ /** Shared process execution used by the built-in shell tools. */
+ export function createLocalShellOperations(shellName: string, resolveShellConfig: () => ShellConfig): BashOperations {
+-	return {
+-		exec: async (command, cwd, { onData, signal, timeout, env }) => {
++	const operations: BashOperations = {
++		exec: async (
++			command,
++			cwd,
++			{ onData, signal, timeout, env, executionContext, presentationContext, isPlanCurrent },
++		) => {
++			if (localInvocation.getStore() !== executionContext)
++				throw new Error("Missing or mismatched native execution context");
+ 			const timeoutMs = resolveTimeoutMs(timeout);
+ 			if (signal?.aborted) {
+ 				throw new Error("aborted");
+@@ -109,10 +132,48 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
+ 			}
+ 
+ 			const commandFromStdin = shellConfig.commandTransport === "stdin";
+-			const child = spawn(shellConfig.shell, commandFromStdin ? shellConfig.args : [...shellConfig.args, command], {
++			let shell = shellConfig.shell;
++			let args = commandFromStdin ? shellConfig.args : [...shellConfig.args, command];
++			let processEnv = env ?? getShellEnv();
++			if (executionContext) {
++				executionContext.assertValid(operations.exec);
++				const ui = presentationContext?.ui;
++				const presentationCwd = presentationContext?.cwd;
++				const originalEnv = processEnv;
++				processEnv = { ...originalEnv };
++				const originalArgs = [...shellConfig.args];
++				args = [...args];
++				const plan: LocalBashExecutionPlan = Object.freeze({
++					kind: "local-bash",
++					command,
++					cwd,
++					timeoutMs,
++					shell,
++					args: Object.freeze([...args]),
++					commandTransport: commandFromStdin ? "stdin" : "argv",
++				});
++				await executionContext.admit(plan, presentationContext, () => presentationContext?.hasUI === true);
++				executionContext.assertValid();
++				if (
++					presentationContext?.ui !== ui ||
++					presentationContext?.cwd !== presentationCwd ||
++					isPlanCurrent?.() === false ||
++					signal?.aborted ||
++					shellConfig.shell !== shell ||
++					(shellConfig.commandTransport === "stdin") !== commandFromStdin ||
++					shellConfig.args.length !== originalArgs.length ||
++					shellConfig.args.some((arg, index) => arg !== originalArgs[index]) ||
++					Object.keys(originalEnv).length !== Object.keys(processEnv).length ||
++					Object.keys(processEnv).some((key) => originalEnv[key] !== processEnv[key])
++				)
++					throw new Error("Prepared local invocation changed during admission");
++				// Use only the captured plan. There is no asynchronous preparation after this point.
++				shell = plan.shell;
++			}
++			const child = spawn(shell, args, {
+ 				cwd,
+ 				detached: process.platform !== "win32",
+-				env: env ?? getShellEnv(),
++				env: processEnv,
+ 				stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
+ 				windowsHide: true,
+ 			});
+@@ -163,6 +224,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
+ 			}
+ 		},
+ 	};
++	return operations;
+ }
+ 
+ /**
+@@ -172,7 +234,21 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
+  * standard local shell behavior while wrapping or rewriting commands.
+  */
+ export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
+-	return createLocalShellOperations("bash", () => getShellConfig(options?.shellPath));
++	const operations = createLocalShellOperations("bash", () => getShellConfig(options?.shellPath));
++	const executor = operations.exec;
++	registerToolExecutionContext(executor, () => operations.exec === executor, localInvocationScope);
++	return operations;
++}
++
++/** Immutable final local-process values. Environment values are deliberately not exposed. */
++export interface LocalBashExecutionPlan {
++	readonly kind: "local-bash";
++	readonly command: string;
++	readonly cwd: string;
++	readonly timeoutMs: number | undefined;
++	readonly shell: string;
++	readonly args: readonly string[];
++	readonly commandTransport: "stdin" | "argv";
+ }
+ 
+ export interface BashSpawnContext {
+@@ -212,6 +288,8 @@ function resolveSpawnContext(
+ }
+ 
+ export interface BashToolOptions {
++	/** Require admission even for direct calls. Native dispatcher eligibility does not depend on this flag. */
++	requireAdmission?: boolean;
+ 	/** Custom operations for command execution. Default: local shell */
+ 	operations?: BashOperations;
+ 	/** Command prefix prepended to every command (for example shell setup commands) */
+@@ -249,7 +327,9 @@ export function createShellToolDefinition(
+ 	const commandPrefix = options?.commandPrefix;
+ 	const exposeSessionEnvironment = options?.exposeSessionEnvironment ?? true;
+ 	const spawnHook = options?.spawnHook;
+-	return {
++	const backend = ops.exec;
++	const requireAdmission = options?.requireAdmission === true;
++	const definition: ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> = {
+ 		name: config.name,
+ 		label: config.label,
+ 		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+@@ -265,6 +345,12 @@ export function createShellToolDefinition(
+ 			onUpdate?,
+ 			ctx?: ExtensionContext,
+ 		) {
++			// Ambient lifecycle evidence can only reject a lost/mismatched forwarded
++			// frame. Never recover that frame or authorize execution from this store.
++			if (localInvocation.getStore() !== ctx?.toolExecutionContext)
++				throw new Error("Missing or mismatched native execution context");
++			if (requireAdmission && !ctx?.toolExecutionContext) throw new Error("Host admission context required");
++			ctx?.toolExecutionContext?.assertValid(definition.execute);
+ 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
+ 			const spawnContext = resolveSpawnContext(
+ 				resolvedCommand,
+@@ -273,6 +359,7 @@ export function createShellToolDefinition(
+ 				exposeSessionEnvironment,
+ 				ctx,
+ 			);
++			const prepared = ctx?.toolExecutionContext ? { ...spawnContext } : undefined;
+ 			const output = new OutputAccumulator({ tempFilePrefix: config.tempFilePrefix });
+ 			let acceptingOutput = true;
+ 			let updateTimer: NodeJS.Timeout | undefined;
+@@ -361,12 +448,26 @@ export function createShellToolDefinition(
+ 			try {
+ 				let exitCode: number | null;
+ 				try {
+-					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
++					ctx?.toolExecutionContext?.assertValid();
++					const execOptions = {
+ 						onData: handleData,
+ 						signal,
+ 						timeout,
+ 						env: spawnContext.env,
+-					});
++						...(ctx?.toolExecutionContext
++							? {
++									executionContext: ctx.toolExecutionContext,
++									presentationContext: ctx,
++									isPlanCurrent: () =>
++										spawnContext.command === prepared?.command &&
++										spawnContext.cwd === prepared?.cwd &&
++										spawnContext.env === prepared?.env,
++								}
++							: {}),
++					};
++					const result = ctx?.toolExecutionContext
++						? await Reflect.apply(backend, ops, [spawnContext.command, spawnContext.cwd, execOptions])
++						: await ops.exec(spawnContext.command, spawnContext.cwd, execOptions);
+ 					exitCode = result.exitCode;
+ 				} catch (err) {
+ 					const snapshot = await finishOutput();
+@@ -412,6 +513,8 @@ export function createShellToolDefinition(
+ 		},
+ 		...createShellRenderers(config.prompt),
+ 	};
++	bindToolExecutionContext(definition.execute, backend, () => ops.exec === backend);
++	return definition;
+ }
+ 
+ const bashToolConfig: ShellToolConfig = {
+diff --git a/packages/coding-agent/src/core/tools/tool-definition-wrapper.ts b/packages/coding-agent/src/core/tools/tool-definition-wrapper.ts
+index 9a9465dec028facee3ed9ef9a86324c7c90bb671..c231031a0e1b281302b58c750b9ee060d11409a5 100644
+--- a/packages/coding-agent/src/core/tools/tool-definition-wrapper.ts
++++ b/packages/coding-agent/src/core/tools/tool-definition-wrapper.ts
+@@ -1,4 +1,4 @@
+-import type { AgentTool } from "@earendil-works/pi-agent-core";
++import { type AgentTool, bindToolExecutionContext, isToolExecutionContext } from "@earendil-works/pi-agent-core";
+ import type { ExtensionToolContext, ToolDefinition } from "../extensions/types.ts";
+ 
+ /** Creates the context for one tool call. */
+@@ -9,7 +9,8 @@ export function wrapToolDefinition<TDetails = unknown>(
+ 	definition: ToolDefinition<any, TDetails>,
+ 	ctxFactory?: ToolContextFactory,
+ ): AgentTool<any, TDetails> {
+-	return {
++	const delegate = definition.execute;
++	const tool: ReturnType<typeof wrapToolDefinition<TDetails>> = {
+ 		name: definition.name,
+ 		label: definition.label,
+ 		description: definition.description,
+@@ -18,15 +19,27 @@ export function wrapToolDefinition<TDetails = unknown>(
+ 		constrainedSampling: definition.constrainedSampling,
+ 		prepareArguments: definition.prepareArguments,
+ 		executionMode: definition.executionMode,
+-		execute: (toolCallId, params, signal, onUpdate, ctx?: ExtensionToolContext) =>
+-			definition.execute(
+-				toolCallId,
+-				params,
+-				signal,
+-				onUpdate,
+-				ctx ?? (ctxFactory?.(toolCallId, signal) as ExtensionToolContext),
+-			),
++		execute: (toolCallId, params, signal, onUpdate, supplied?: unknown) => {
++			const executionContext = isToolExecutionContext(supplied) ? supplied : undefined;
++			let ctx = executionContext
++				? ctxFactory?.(toolCallId, signal)
++				: ((supplied as ExtensionToolContext | undefined) ?? ctxFactory?.(toolCallId, signal));
++			if (executionContext) {
++				executionContext.assertValid();
++				// Keep runner getters lazy: session replacement must still invalidate this context.
++				ctx = Object.defineProperties(
++					{},
++					{
++						...Object.getOwnPropertyDescriptors(ctx ?? {}),
++						toolExecutionContext: { value: executionContext },
++					},
++				) as ExtensionToolContext;
++			}
++			return definition.execute(toolCallId, params, signal, onUpdate, ctx as ExtensionToolContext);
++		},
+ 	};
++	bindToolExecutionContext(tool.execute, delegate, () => definition.execute === delegate);
++	return tool;
+ }
+ 
+ /** Wrap multiple ToolDefinitions into AgentTools for the core runtime. */
+@@ -44,7 +57,8 @@ export function wrapToolDefinitions(
+  * provides plain AgentTool overrides that do not include prompt metadata or renderers.
+  */
+ export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDefinition<any, unknown> {
+-	return {
++	const delegate = tool.execute;
++	const definition: ToolDefinition<any, unknown> = {
+ 		name: tool.name,
+ 		label: tool.label,
+ 		description: tool.description,
+@@ -53,6 +67,11 @@ export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDef
+ 		constrainedSampling: tool.constrainedSampling,
+ 		prepareArguments: tool.prepareArguments,
+ 		executionMode: tool.executionMode,
+-		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
++		execute: async (toolCallId, params, signal, onUpdate, ctx) =>
++			ctx?.toolExecutionContext
++				? tool.execute(toolCallId, params, signal, onUpdate, ctx.toolExecutionContext)
++				: tool.execute(toolCallId, params, signal, onUpdate),
+ 	};
++	bindToolExecutionContext(definition.execute, delegate, () => tool.execute === delegate);
++	return definition;
+ }
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index 0b8fb1dd209d8064e083585dd862b4d592e45eb8..4df7965d1c92a82e2f13bc5e5684149a224bcc1d 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -1,3 +1,11 @@
++export {
++	bindToolExecutionContext,
++	type ToolExecutionAdmission,
++	type ToolExecutionContext,
++	type ToolExecutionDecision,
++} from "@earendil-works/pi-agent-core";
++export type { LocalBashExecutionPlan } from "./core/tools/bash.ts";
++
+ // Core session management
+ 
+ export { type Args, parseArgs } from "./cli/args.ts";
+diff --git a/packages/coding-agent/test/bash-preexec-admission.test.ts b/packages/coding-agent/test/bash-preexec-admission.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..dba25dd9fd0d5da7742da2ad8a6b26c1b2143882
+--- /dev/null
++++ b/packages/coding-agent/test/bash-preexec-admission.test.ts
+@@ -0,0 +1,559 @@
++import {
++	type AgentTool,
++	bindToolExecutionContext,
++	runToolCall,
++	type ToolExecutionAdmission,
++} from "@earendil-works/pi-agent-core";
++import type { AssistantMessage } from "@earendil-works/pi-ai";
++import * as childProcess from "child_process";
++import { afterEach, expect, it, vi } from "vitest";
++import { ExtensionRunner } from "../src/core/extensions/runner.ts";
++import type {
++	Extension,
++	ExtensionRuntime,
++	ExtensionToolContext,
++	ExtensionUIContext,
++	RegisteredTool,
++	ToolCallEventResult,
++} from "../src/core/extensions/types.ts";
++import { wrapRegisteredTool } from "../src/core/extensions/wrapper.ts";
++import type { ModelRegistry } from "../src/core/model-registry.ts";
++import type { SessionManager } from "../src/core/session-manager.ts";
++import {
++	createBashToolDefinition,
++	createLocalBashOperations,
++	createLocalShellOperations,
++} from "../src/core/tools/bash.ts";
++import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
++import * as shellUtils from "../src/utils/shell.ts";
++
++vi.mock("child_process", async (importOriginal) => {
++	const original = await importOriginal<typeof childProcess>();
++	return { ...original, spawn: vi.fn(original.spawn) };
++});
++
++const cwd = process.env.TMPDIR!;
++const assistantMessage: AssistantMessage = {
++	role: "assistant",
++	content: [],
++	api: "openai-responses",
++	provider: "openai",
++	model: "mock",
++	usage: {
++		input: 0,
++		output: 0,
++		cacheRead: 0,
++		cacheWrite: 0,
++		totalTokens: 0,
++		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
++	},
++	stopReason: "toolUse",
++	timestamp: 0,
++};
++function fixture(hasUI = true) {
++	const context = { cwd, hasUI, ui: { confirm: async () => true } } as unknown as ExtensionToolContext;
++	const definition = createBashToolDefinition(cwd, {
++		requireAdmission: true,
++		commandPrefix: "# prefix",
++		exposeSessionEnvironment: false,
++		spawnHook: (plan) => ({
++			...plan,
++			command: `${plan.command}\nprintf hooked`,
++			env: { ...plan.env, ADMISSION_TEST: "original" },
++		}),
++	});
++	return { context, definition, tool: wrapToolDefinition(definition, () => context) };
++}
++function run(tool: AgentTool, admission: ToolExecutionAdmission, signal?: AbortSignal) {
++	return runToolCall(
++		{ type: "toolCall", id: "reused", name: tool.name, arguments: { command: "printf admitted", timeout: 2 } },
++		{
++			tools: [tool],
++			context: { messages: [], tools: [tool] },
++			assistantMessage,
++			signal,
++			beforeToolCall: async () => ({ admission }),
++		},
++	);
++}
++afterEach(() => {
++	vi.restoreAllMocks();
++	vi.clearAllMocks();
++});
++
++it("awaits fresh approval of final shell argv/cwd/timeout before exactly one spawn", async () => {
++	const spawn = vi.mocked(childProcess.spawn);
++	const { tool, context } = fixture();
++	let affirm!: (value: boolean) => void;
++	let entered!: () => void;
++	const waiting = new Promise<void>((resolve) => {
++		entered = resolve;
++	});
++	const approve = vi.fn(async (plan: unknown, ui: unknown) => {
++		expect(spawn).not.toHaveBeenCalled();
++		expect(ui).toMatchObject({ cwd, hasUI: true, ui: context.ui });
++		expect(plan).toMatchObject({ command: "# prefix\nprintf admitted\nprintf hooked", cwd, timeoutMs: 2000 });
++		expect(Object.isFrozen(plan)).toBe(true);
++		const decision = new Promise<boolean>((resolve) => {
++			affirm = resolve;
++		});
++		entered();
++		return decision;
++	});
++	const result = run(tool, { isValid: () => true, approve });
++	// Do not hang a behavioral RED when the baseline omits the callback.
++	await Promise.race([waiting, result]);
++	expect(approve).toHaveBeenCalledTimes(1);
++	expect(spawn).not.toHaveBeenCalled();
++	affirm(true);
++	expect((await result).isError).toBe(false);
++	expect(spawn).toHaveBeenCalledTimes(1);
++	const [shell, argv, options] = spawn.mock.calls[0];
++	expect(typeof shell).toBe("string");
++	expect(argv?.at(-1)).toBe("# prefix\nprintf admitted\nprintf hooked");
++	expect(options).toMatchObject({ cwd, env: { ADMISSION_TEST: "original" } });
++});
++
++it.each(["deny", "error", "noUI", "cancel", "policy", "executor", "backend"])(
++	"starts zero processes for %s",
++	async (mode) => {
++		const spawn = vi.mocked(childProcess.spawn);
++		const { context, definition } = fixture(mode !== "noUI");
++		const operations = createLocalBashOperations();
++		const localDefinition = createBashToolDefinition(cwd, {
++			operations,
++			exposeSessionEnvironment: false,
++			requireAdmission: true,
++		});
++		const tool = wrapToolDefinition(mode === "backend" ? localDefinition : definition, () => context);
++		let current = true;
++		const abort = new AbortController();
++		const approve = vi.fn(async () => {
++			if (mode === "error") throw new Error("UI failed");
++			if (mode === "cancel") abort.abort();
++			if (mode === "policy") current = false;
++			if (mode === "executor") tool.execute = async () => ({ content: [], details: undefined });
++			if (mode === "backend") operations.exec = async () => ({ exitCode: 0 });
++			return mode !== "deny";
++		});
++		const result = await run(tool, { isValid: () => current, approve }, abort.signal);
++		expect(spawn).not.toHaveBeenCalled();
++		expect(result.isError).toBe(true);
++		if (mode === "noUI") expect(approve).not.toHaveBeenCalled();
++		else expect(approve).toHaveBeenCalledTimes(1);
++	},
++);
++
++it("does not admit a custom backend or copied definition metadata", async () => {
++	let calls = 0;
++	const definition = createBashToolDefinition(cwd, {
++		requireAdmission: true,
++		operations: {
++			exec: async () => {
++				calls++;
++				return { exitCode: 0 };
++			},
++		},
++	});
++	const { context } = fixture();
++	const approve = vi.fn(async () => true);
++	expect(
++		(
++			await run(
++				wrapToolDefinition(definition, () => context),
++				{ isValid: () => true, approve },
++			)
++		).isError,
++	).toBe(true);
++	expect(calls).toBe(0);
++	expect(approve).not.toHaveBeenCalled();
++});
++
++it("fails before process start when a bound presentation wrapper loses required context", async () => {
++	const spawn = vi.mocked(childProcess.spawn);
++	const options = { requireAdmission: true, exposeSessionEnvironment: false };
++	const definition = createBashToolDefinition(cwd, options);
++	const { context } = fixture();
++	const native = wrapToolDefinition(definition, () => context);
++	const wrapper: AgentTool = {
++		...native,
++		execute: (id, params, signal, update) => native.execute(id, params, signal, update),
++	};
++	bindToolExecutionContext(wrapper.execute, native.execute, () => true);
++	expect((await run(wrapper, { isValid: () => true, approve: async () => true })).isError).toBe(true);
++	expect(spawn).not.toHaveBeenCalled();
++});
++
++it("rejects lost context on a default eligible factory while preserving the same instance's legacy calls", async () => {
++	const definition = createBashToolDefinition(cwd, {
++		shellPath: "/bin/sh",
++		commandPrefix: "# original",
++		exposeSessionEnvironment: false,
++	});
++	const { context } = fixture();
++	const native = wrapToolDefinition(definition, () => context);
++	const spawn = vi.mocked(childProcess.spawn);
++	const args = { command: "printf admitted", timeout: 2 };
++	const before = await native.execute("reused", args);
++	const startsBefore = spawn.mock.calls.length;
++	let wrapperEntries = 0;
++	const delegate = native.execute;
++	const wrapper: AgentTool = {
++		...native,
++		execute: (id, params, signal, update) => {
++			wrapperEntries++;
++			return native.execute(id, params, signal, update);
++		},
++	};
++	bindToolExecutionContext(wrapper.execute, delegate, () => native.execute === delegate);
++	const approve = vi.fn(async () => true);
++	const guarded = await run(wrapper, { isValid: () => true, approve });
++	const guardedStarts = spawn.mock.calls.length - startsBefore;
++	const after = await native.execute("reused", args);
++	expect(before.content).toEqual([{ type: "text", text: "admitted" }]);
++	expect(after.content).toEqual(before.content);
++	expect(startsBefore).toBe(1);
++	expect(spawn.mock.calls.length - startsBefore - guardedStarts).toBe(1);
++	// Capability refusal must not masquerade as proof of context-loss handling.
++	expect(wrapperEntries).toBe(1);
++	expect(guarded.isError).toBe(true);
++	expect(guardedStarts).toBe(0);
++	expect(approve).not.toHaveBeenCalled();
++});
++
++it("keeps concurrent reused IDs separate", async () => {
++	const { tool } = fixture();
++	const spawn = vi.mocked(childProcess.spawn);
++	let entered!: () => void;
++	let decide!: (value: boolean) => void;
++	const waiting = new Promise<void>((resolve) => {
++		entered = resolve;
++	});
++	const first = run(tool, {
++		isValid: () => true,
++		approve: async () => {
++			const decision = new Promise<boolean>((resolve) => {
++				decide = resolve;
++			});
++			entered();
++			return decision;
++		},
++	});
++	await waiting;
++	const denied = await run(tool, { isValid: () => true, approve: async () => false });
++	expect(denied.isError).toBe(true);
++	expect(spawn.mock.calls.length).toBe(0);
++	decide(true);
++	expect((await first).isError).toBe(false);
++	expect(spawn.mock.calls.length).toBe(1);
++});
++
++it("does not start a second process when a bound wrapper repeats the same context", async () => {
++	const { tool: native } = fixture();
++	const delegate = native.execute;
++	const wrapper: AgentTool = {
++		...native,
++		execute: async (id, params, signal, update, context) => {
++			await native.execute(id, params, signal, update, context);
++			return native.execute(id, params, signal, update, context);
++		},
++	};
++	bindToolExecutionContext(wrapper.execute, delegate, () => native.execute === delegate);
++	const approve = vi.fn(async () => true);
++	expect((await run(wrapper, { isValid: () => true, approve })).isError).toBe(true);
++	expect(approve).toHaveBeenCalledTimes(1);
++	expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(1);
++});
++
++it("preserves hard denial precedence and rejects retained spawn-hook mutations", async () => {
++	const spawn = vi.mocked(childProcess.spawn);
++	let retained: { command: string; cwd: string; env: NodeJS.ProcessEnv } | undefined;
++	const definition = createBashToolDefinition(cwd, {
++		requireAdmission: true,
++		exposeSessionEnvironment: false,
++		spawnHook: (plan) => {
++			retained = plan;
++			return plan;
++		},
++	});
++	const { context } = fixture();
++	const tool = wrapToolDefinition(definition, () => context);
++	const approve = vi.fn(async () => {
++		retained!.command = "printf changed";
++		return true;
++	});
++	const blocked = await runToolCall(
++		{ type: "toolCall", id: "same", name: "bash", arguments: { command: "printf ok" } },
++		{
++			tools: [tool],
++			context: { messages: [], tools: [tool] },
++			assistantMessage,
++			beforeToolCall: async () => ({
++				block: true,
++				reason: "hard denial",
++				admission: { isValid: () => true, approve },
++			}),
++		},
++	);
++	expect(blocked.isError).toBe(true);
++	expect(retained).toBeUndefined();
++	expect(approve).not.toHaveBeenCalled();
++	expect((await run(tool, { isValid: () => true, approve })).isError).toBe(true);
++	expect(spawn.mock.calls.length).toBe(0);
++});
++
++it.each(["allow", "deny", "confirm"] as const)(
++	"evaluates transformed commands with final decision %s",
++	async (decision) => {
++		const { tool } = fixture(decision !== "allow");
++		const evaluate = vi.fn(async (plan: unknown) => {
++			expect(plan).toMatchObject({ command: "# prefix\nprintf admitted\nprintf hooked" });
++			return decision;
++		});
++		const approve = vi.fn(async () => true);
++		const admission = { isValid: () => true, evaluate, approve };
++		const result = await run(tool, admission);
++		expect(evaluate).toHaveBeenCalledTimes(1);
++		expect(result.isError).toBe(decision === "deny");
++		expect(approve).toHaveBeenCalledTimes(decision === "confirm" ? 1 : 0);
++		expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(decision === "deny" ? 0 : 1);
++	},
++);
++
++it("preserves the SDK AgentTool-to-definition bridge through a bound presentation wrapper", async () => {
++	const { tool: native, context } = fixture();
++	const delegate = native.execute;
++	const presentation: AgentTool = {
++		...native,
++		execute: (id, params, signal, update, frame) => native.execute(id, params, signal, update, frame),
++	};
++	bindToolExecutionContext(presentation.execute, delegate, () => native.execute === delegate);
++	const sessionTool = wrapToolDefinition(createToolDefinitionFromAgentTool(presentation), () => context);
++	expect((await run(sessionTool, { isValid: () => true, approve: async () => true })).isError).toBe(false);
++	expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(1);
++});
++
++it("cannot transfer a bound context into a different strict native definition", async () => {
++	const { tool: declared } = fixture();
++	const { tool: different } = fixture();
++	const wrapper: AgentTool = {
++		...declared,
++		execute: (id, params, signal, update, context) => different.execute(id, params, signal, update, context),
++	};
++	bindToolExecutionContext(wrapper.execute, declared.execute, () => true);
++	expect((await run(wrapper, { isValid: () => true, approve: async () => true })).isError).toBe(true);
++	expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(0);
++});
++
++it.each(["allow", "harddeny", "stale", "registry"])(
++	"carries final policy through registered wrappers: %s",
++	async (mode) => {
++		const definition = createToolDefinitionFromAgentTool(fixture().tool);
++		const registered: RegisteredTool = {
++			definition,
++			sourceInfo: { path: "<test:bash>", source: "test", scope: "temporary", origin: "top-level" },
++		};
++		let runner!: ExtensionRunner;
++		const approve = vi.fn(async () => {
++			if (mode === "stale") runner.invalidate();
++			if (mode === "registry")
++				extension.tools.set("bash", {
++					...registered,
++					definition: { ...definition, execute: async () => ({ content: [], details: undefined }) },
++				});
++			return true;
++		});
++		const policy = { isValid: () => true, approve };
++		const extension = {
++			handlers: new Map([
++				[
++					"tool_call",
++					[
++						async () => ({ admission: policy }),
++						async () => (mode === "harddeny" ? { block: true } : { block: false }),
++					],
++				],
++			]),
++			tools: new Map([["bash", registered]]),
++		} as unknown as Extension;
++		runner = new ExtensionRunner(
++			[extension],
++			{ invalidate: () => {} } as unknown as ExtensionRuntime,
++			cwd,
++			{} as SessionManager,
++			{} as ModelRegistry,
++		);
++		runner.setUIContext({ confirm: async () => true } as unknown as ExtensionUIContext, "tui");
++		const tool = wrapRegisteredTool(registered, runner);
++		const outcome = await runToolCall(
++			{ type: "toolCall", id: "registered", name: "bash", arguments: { command: "printf registered" } },
++			{
++				tools: [tool],
++				context: { messages: [], tools: [tool] },
++				assistantMessage,
++				beforeToolCall: async () =>
++					runner.emitToolCall({
++						type: "tool_call",
++						toolName: "bash",
++						toolCallId: "registered",
++						input: { command: "printf registered" },
++					}) as Promise<ToolCallEventResult | undefined>,
++			},
++		);
++		expect(outcome.isError).toBe(mode !== "allow");
++		expect(approve).toHaveBeenCalledTimes(mode === "harddeny" ? 0 : 1);
++		expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(mode === "allow" ? 1 : 0);
++	},
++);
++
++it("admits the prepared stdin transport before sending exactly the approved command", async () => {
++	vi.spyOn(shellUtils, "getShellConfig").mockReturnValue({
++		shell: "/bin/sh",
++		args: ["-s"],
++		commandTransport: "stdin",
++	});
++	const { tool } = fixture();
++	const approve = vi.fn(async (plan: unknown) => {
++		expect(plan).toMatchObject({ shell: "/bin/sh", args: ["-s"], commandTransport: "stdin" });
++		expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(0);
++		return true;
++	});
++	const result = await run(tool, { isValid: () => true, approve });
++	expect(result.isError).toBe(false);
++	expect(result.result.content).toEqual([{ type: "text", text: "admittedhooked" }]);
++	expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(1);
++});
++
++it("rejects a backend replaced by an update callback before invoking that replacement", async () => {
++	const operations = createLocalBashOperations();
++	const { context } = fixture();
++	const tool = wrapToolDefinition(
++		createBashToolDefinition(cwd, { operations, requireAdmission: true, exposeSessionEnvironment: false }),
++		() => context,
++	);
++	let replacementCalls = 0;
++	const result = await runToolCall(
++		{ type: "toolCall", id: "update", name: "bash", arguments: { command: "printf harmless" } },
++		{
++			tools: [tool],
++			context: { messages: [], tools: [tool] },
++			assistantMessage,
++			beforeToolCall: async () => ({ admission: { isValid: () => true, approve: async () => true } }),
++			onUpdate: () => {
++				operations.exec = async () => {
++					replacementCalls++;
++					return { exitCode: 0 };
++				};
++			},
++		},
++	);
++	expect(result.isError).toBe(true);
++	expect(replacementCalls).toBe(0);
++	expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(0);
++});
++
++it.each(["return", "throw", "cancel"])("restores native scope after nested legacy %s", async (mode) => {
++	const { context } = fixture();
++	const native = wrapToolDefinition(
++		createBashToolDefinition(cwd, { shellPath: "/bin/sh", exposeSessionEnvironment: false }),
++		() => context,
++	);
++	const abort = new AbortController();
++	let rejectedLostContext = false;
++	const legacy: AgentTool = {
++		...native,
++		name: "nested",
++		execute: async (id, args) => {
++			await Promise.resolve();
++			const result = await native.execute(id, args);
++			if (mode === "throw") throw new Error("owned nested error");
++			if (mode === "cancel") abort.abort();
++			return result;
++		},
++	};
++	const delegate = native.execute;
++	const wrapper: AgentTool = {
++		...native,
++		execute: async (id, args, signal, update, frame) => {
++			const nested = await runToolCall(
++				{ type: "toolCall", id, name: "nested", arguments: { command: "printf admitted", timeout: 2 } },
++				{
++					tools: [legacy],
++					context: { messages: [], tools: [legacy] },
++					assistantMessage,
++				},
++			);
++			expect(nested.isError).toBe(mode === "throw");
++			try {
++				await native.execute(id, args);
++			} catch {
++				rejectedLostContext = true;
++			}
++			return native.execute(id, args, signal, update, frame);
++		},
++	};
++	bindToolExecutionContext(wrapper.execute, delegate, () => native.execute === delegate);
++	const approve = vi.fn(async () => true);
++	const outcome = await run(wrapper, { isValid: () => true, approve }, abort.signal);
++	expect(rejectedLostContext).toBe(true);
++	expect(outcome.isError).toBe(mode === "cancel");
++	expect(approve).toHaveBeenCalledTimes(mode === "cancel" ? 0 : 1);
++	expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(mode === "cancel" ? 1 : 2);
++	// Leaving the entire guarded scope also restores ordinary direct calls.
++	expect((await native.execute("reused", { command: "printf legacy" })).content).toEqual([
++		{ type: "text", text: "legacy" },
++	]);
++});
++
++it("rejects another invocation's unused frame before its native gate", async () => {
++	const { tool: native } = fixture();
++	let firstFrame: unknown;
++	let entered!: () => void;
++	let release!: () => void;
++	const waiting = new Promise<void>((resolve) => {
++		entered = resolve;
++	});
++	const hold = new Promise<void>((resolve) => {
++		release = resolve;
++	});
++	let calls = 0;
++	const delegate = native.execute;
++	const wrapper: AgentTool = {
++		...native,
++		execute: async (id, args, signal, update, frame) => {
++			if (++calls === 1) {
++				firstFrame = frame;
++				entered();
++				await hold;
++			}
++			return native.execute(id, args, signal, update, firstFrame);
++		},
++	};
++	bindToolExecutionContext(wrapper.execute, delegate, () => native.execute === delegate);
++	const firstApproval = vi.fn(async () => true);
++	const secondApproval = vi.fn(async () => true);
++	const first = run(wrapper, { isValid: () => true, approve: firstApproval });
++	await waiting;
++	const second = await run(wrapper, { isValid: () => true, approve: secondApproval });
++	expect(second.isError).toBe(true);
++	expect(firstApproval).not.toHaveBeenCalled();
++	expect(secondApproval).not.toHaveBeenCalled();
++	expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(0);
++	release();
++	expect((await first).isError).toBe(false);
++	expect(firstApproval).toHaveBeenCalledTimes(1);
++	expect(vi.mocked(childProcess.spawn).mock.calls.length).toBe(1);
++});
++
++it("preserves the shared sibling shell backend without an admission requirement", async () => {
++	const operations = createLocalShellOperations("sibling", () => ({ shell: "/bin/sh", args: ["-c"] }));
++	let output = "";
++	const result = await operations.exec("printf sibling", cwd, {
++		onData: (data) => {
++			output += data;
++		},
++		timeout: 2,
++	});
++	expect(result.exitCode).toBe(0);
++	expect(output).toBe("sibling");
++});

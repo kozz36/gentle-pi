@@ -1,0 +1,386 @@
+From 63b19124136f348b65979ffde3d34dfc70f82c51 Mon Sep 17 00:00:00 2001
+From: Kozz36 <vjose8506@gmail.com>
+Date: Mon, 19 Oct 2026 19:07:14 -0500
+Subject: [PATCH 4/4] fix(coding-agent): resolve live tool owners with dispatch
+ precedence
+
+Bind registered forwarding to the live merged tool registry, including
+custom tools and extension shadowing. Preserve exact definition and
+delegate validity during pending approval and session replacement.
+Keep public dynamic-tool regressions and extension docs with the change.
+
+Retained evidence: scoped SDK verification and the public session probe;
+post-correction focused self, independent and parent spot checks each
+passed 42 tests including the unchanged dynamic-tool cases. No execution
+of every intermediate repository snapshot or global PASS is claimed.
+The native gate and its prototype-policy correction were approved and
+acknowledged separately; that approval is not this unit's authority.
+GP global remains RED; consultation causality remains UNKNOWN.
+No activation, publication, global install, or P01 operation.
+
+Risk: items 2 and 4 (live executor ownership and pending invocation state).
+---
+ packages/coding-agent/docs/extensions.md      |  16 ++
+ .../coding-agent/src/core/agent-session.ts    |  36 ++-
+ .../test/agent-session-dynamic-tools.test.ts  | 232 +++++++++++++++++-
+ 3 files changed, 269 insertions(+), 15 deletions(-)
+
+diff --git a/packages/coding-agent/docs/extensions.md b/packages/coding-agent/docs/extensions.md
+index c0c7fd23cd7d07f832ed689670e994e51e750110..8c62ae2b8a20442e61778d366b4b816d00460fc1 100644
+--- a/packages/coding-agent/docs/extensions.md
++++ b/packages/coding-agent/docs/extensions.md
+@@ -105,6 +105,22 @@ Events cover resource discovery, sessions, agent and message lifecycle, provider
+ 
+ `message_end` can replace a finalized message while preserving its role. `tool_call` can mutate input or block execution. `tool_result` handlers compose, with each handler seeing prior changes.
+ 
++For final local Bash approval, return `{ admission: { isValid, evaluate, approve } }`
++from `tool_call` for every guarded invocation of the SDK's actual standard-local
++Bash owner, including the configured default. Do not register a replacement merely
++to enable admission. `requireAdmission: true` additionally rejects direct legacy
++calls without context; it is not necessary for dispatcher eligibility. Final `evaluate` may allow a safe plan without UI, hard-deny it, or
++require confirmation, including when prefix/spawnHook changed a harmless raw command. The request
++survives later nonblocking handlers; multiple requests must all affirm, and any
++hard block still wins. The host rejects unknown actual executors before invoking
++them. `approve` runs at the final native local-process boundary, not at this event's
++argument snapshot. See [Final local Bash admission](sdk.md#final-local-bash-admission)
++for signatures, actual-function scope/binding, context-loss handling and the native
++trust boundary. Guarded lost/mismatched context fails before effects, while ordinary
++calls on the same default instance remain compatible before and after guarded use.
++Nested non-admission dispatch explicitly clears native scope and restores its caller;
++concurrent calls cannot borrow each other's frames.
++
+ <a id="provider_stream_event"></a>
+ 
+ `provider_stream_event` fires for each parsed provider stream event before Pi normalizes it. The event identifies the provider, API, and model; `event.data` is the earliest structured value available to Pi, not necessarily the original HTTP bytes or SSE frame. Treat it as read-only because mutation can affect normalization. The event is notification-only and is not persisted.
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index 8b330d555d0f45469fb291a2206217671d3977d5..b8d8d23204a1fe7b305300fc18693bb206450270 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -110,9 +110,9 @@ import {
+ 	type ToolLoadout,
+ 	type TreePreparation,
+ 	type TurnStartEvent,
+-	wrapRegisteredTools,
+ } from "./extensions/index.ts";
+ import { type BeforeAgentStartTrigger, emitSessionShutdownEvent } from "./extensions/runner.ts";
++import { wrapRegisteredToolsWithOwner } from "./extensions/wrapper.ts";
+ import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
+ import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
+ import { ModelRegistry } from "./model-registry.ts";
+@@ -3522,15 +3522,11 @@ export class AgentSession {
+ 		);
+ 	}
+ 
+-	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
+-		// Tools that were already activated on registration. A tool whose exposure changes to
+-		// `direct` or `model-only` (for example from `hidden`) is activated like a new tool.
+-		const previousActivatedOnRegistration = new Set(
+-			[...this._toolRegistry.keys()].filter((name) => this._isActivatedOnRegistration(name)),
+-		);
+-		const previousActiveToolNames = this.getActiveToolNames();
+-		const allowedTools = this._allowedTools;
+-
++	/** Recompute live ownership with the same precedence used to build executable tools. */
++	private _getToolRegistrations(): {
++		customTools: ToolDefinitionEntry[];
++		definitions: Map<string, ToolDefinitionEntry>;
++	} {
+ 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
+ 		const allCustomTools = [
+ 			...registeredTools,
+@@ -3556,6 +3552,18 @@ export class AgentSession {
+ 				sourceInfo: tool.sourceInfo,
+ 			});
+ 		}
++		return { customTools: allCustomTools, definitions: definitionRegistry };
++	}
++
++	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
++		// Tools that were already activated on registration. A tool whose exposure changes to
++		// `direct` or `model-only` (for example from `hidden`) is activated like a new tool.
++		const previousActivatedOnRegistration = new Set(
++			[...this._toolRegistry.keys()].filter((name) => this._isActivatedOnRegistration(name)),
++		);
++		const previousActiveToolNames = this.getActiveToolNames();
++		const allowedTools = this._allowedTools;
++		const { customTools: allCustomTools, definitions: definitionRegistry } = this._getToolRegistrations();
+ 		this._toolDefinitions = definitionRegistry;
+ 		this._toolPromptSnippets = new Map(
+ 			Array.from(definitionRegistry.values())
+@@ -3574,8 +3582,11 @@ export class AgentSession {
+ 				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
+ 		);
+ 		const runner = this._extensionRunner;
+-		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
+-		const wrappedBuiltInTools = wrapRegisteredTools(
++		// Resolve from live owners, not the last refresh's snapshot or extension-only lookup.
++		const getCurrentDefinition = (name: string) =>
++			this._extensionRunner === runner ? this._getToolRegistrations().definitions.get(name)?.definition : undefined;
++		const wrappedExtensionTools = wrapRegisteredToolsWithOwner(allCustomTools, runner, getCurrentDefinition);
++		const wrappedBuiltInTools = wrapRegisteredToolsWithOwner(
+ 			Array.from(this._baseToolDefinitions.values())
+ 				.filter((definition) => this._isAllowedTool(definition.name))
+ 				.map((definition) => ({
+@@ -3585,6 +3596,7 @@ export class AgentSession {
+ 					}),
+ 				})),
+ 			runner,
++			getCurrentDefinition,
+ 		);
+ 
+ 		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
+diff --git a/packages/coding-agent/test/agent-session-dynamic-tools.test.ts b/packages/coding-agent/test/agent-session-dynamic-tools.test.ts
+index afeb0f2d171c4774706f8dd492724fc8046cce74..287974c688a18fd7d88c1c125f70dff03d2a234c 100644
+--- a/packages/coding-agent/test/agent-session-dynamic-tools.test.ts
++++ b/packages/coding-agent/test/agent-session-dynamic-tools.test.ts
+@@ -1,14 +1,25 @@
+-import { existsSync, mkdirSync, rmSync } from "node:fs";
++import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { getModel } from "@earendil-works/pi-ai/compat";
++import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
++import * as childProcess from "child_process";
+ import { Type } from "typebox";
+-import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
++import { defineTool } from "../src/core/extensions/types.ts";
++import { ModelRuntime } from "../src/core/model-runtime.ts";
+ import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
+ import { createAgentSession } from "../src/core/sdk.ts";
+ import { SessionManager } from "../src/core/session-manager.ts";
+ import { SettingsManager } from "../src/core/settings-manager.ts";
+-import { createBashTool } from "../src/core/tools/bash.ts";
++import { createBashTool, createBashToolDefinition } from "../src/core/tools/bash.ts";
++import { createTestUiContext } from "./suite/harness.ts";
++
++vi.mock("child_process", async (importOriginal) => {
++	const original = await importOriginal<typeof childProcess>();
++	return { ...original, spawn: vi.fn(original.spawn) };
++});
+ 
+ describe("AgentSession dynamic tool registration", () => {
+ 	let tempDir: string;
+@@ -165,6 +176,221 @@ describe("AgentSession dynamic tool registration", () => {
+ 		session.dispose();
+ 	});
+ 
++	it.each(["custom", "custom-denied", "custom-shadowing-extension", "custom-replaced", "extension-replaced"])(
++		"binds public session admission to the live owner: %s",
++		async (mode) => {
++			const finalCwd = join(tempDir, "final");
++			mkdirSync(finalCwd);
++			const effect = join(finalCwd, "effect");
++			const command = "printf x >> effect; printf admitted";
++			const finalCommand = `# prefix\n${command}; printf hooked`;
++			const definition = defineTool(
++				createBashToolDefinition(tempDir, {
++					requireAdmission: true,
++					shellPath: "/bin/sh",
++					exposeSessionEnvironment: false,
++					commandPrefix: "# prefix",
++					spawnHook: (context) => ({ ...context, command: `${context.command}; printf hooked`, cwd: finalCwd }),
++				}),
++			);
++			const customTools = [definition];
++			const settingsManager = SettingsManager.inMemory({
++				compaction: { enabled: false },
++				retry: { enabled: false },
++				cacheWarming: "off",
++			});
++			const modelRuntime = await ModelRuntime.create({
++				modelsPath: null,
++				refreshOnCreate: false,
++				allowModelNetwork: false,
++				authPath: join(agentDir, "auth.json"),
++			});
++			const faux = fauxProvider({ provider: `admission-owner-${mode}`, tokensPerSecond: Infinity });
++			modelRuntime.registerNativeProvider(faux.provider);
++			let session: AgentSession | undefined;
++			let release: (approved: boolean) => void = () => {};
++			let entered!: () => void;
++			let replace!: () => void;
++			const waiting = new Promise<void>((resolve) => {
++				entered = resolve;
++			});
++			const evaluate = vi.fn((plan: unknown) => {
++				expect(plan).toMatchObject({
++					command: finalCommand,
++					cwd: finalCwd,
++					timeoutMs: 2000,
++					shell: "/bin/sh",
++					args: ["-c", finalCommand],
++				});
++				return "confirm" as const;
++			});
++			const approve = vi.fn(async (_plan: unknown, context: unknown) => {
++				expect(context).toMatchObject({ cwd: tempDir, hasUI: true });
++				const answer = new Promise<boolean>((resolve) => {
++					release = resolve;
++				});
++				entered();
++				return answer;
++			});
++			const resourceLoader = new DefaultResourceLoader({
++				cwd: tempDir,
++				agentDir,
++				settingsManager,
++				noExtensions: true,
++				noSkills: true,
++				noThemes: true,
++				noPromptTemplates: true,
++				noContextFiles: true,
++				extensionFactories: [
++					(pi) => {
++						if (mode === "extension-replaced") pi.registerTool(definition);
++						if (mode === "custom-shadowing-extension")
++							pi.registerTool(createBashToolDefinition(tempDir, { requireAdmission: true }));
++						replace = () => pi.registerTool({ ...definition });
++						pi.on("tool_call", () => ({ admission: { isValid: () => true, evaluate, approve } }));
++					},
++				],
++			});
++			await resourceLoader.reload();
++			const created = await createAgentSession({
++				cwd: tempDir,
++				agentDir,
++				modelRuntime,
++				model: faux.getModel(),
++				thinkingLevel: "off",
++				tools: ["bash"],
++				settingsManager,
++				sessionManager: SessionManager.inMemory(tempDir),
++				resourceLoader,
++				customTools: mode === "extension-replaced" ? [] : customTools,
++			});
++			session = created.session;
++			const outcomes: Extract<AgentSessionEvent, { type: "tool_execution_end" }>[] = [];
++			session.subscribe((event) => {
++				if (event.type === "tool_execution_end") outcomes.push(event);
++			});
++			await session.bindExtensions({ mode: "rpc", uiContext: createTestUiContext({ confirm: async () => true }) });
++			faux.setResponses([
++				fauxAssistantMessage([fauxToolCall("bash", { command, timeout: 2 })], { stopReason: "toolUse" }),
++				fauxAssistantMessage("done"),
++			]);
++			const spawn = vi.mocked(childProcess.spawn);
++			spawn.mockClear();
++			const pending = session.prompt("Run the harmless owned counter.");
++			try {
++				await Promise.race([waiting, pending]);
++				expect(evaluate).toHaveBeenCalledTimes(1);
++				expect(approve).toHaveBeenCalledTimes(1);
++				expect(spawn.mock.calls.length).toBe(0);
++				expect(existsSync(effect)).toBe(false);
++				if (mode === "extension-replaced") replace();
++				if (mode === "custom-replaced") customTools[0] = { ...definition };
++				release(mode !== "custom-denied");
++				await pending;
++				const allowed = mode === "custom" || mode === "custom-shadowing-extension";
++				expect(spawn.mock.calls.length).toBe(allowed ? 1 : 0);
++				expect(outcomes).toHaveLength(1);
++				expect(outcomes[0].isError).toBe(!allowed);
++				if (allowed) {
++					expect(readFileSync(effect, "utf8")).toBe("x");
++					expect(spawn.mock.calls[0].slice(0, 2)).toEqual(["/bin/sh", ["-c", finalCommand]]);
++					expect(spawn.mock.calls[0][2]).toMatchObject({ cwd: finalCwd });
++					expect(outcomes[0].result.structuredContent).toMatchObject({ output: "admittedhooked", exit_code: 0 });
++				} else expect(existsSync(effect)).toBe(false);
++			} finally {
++				release(false);
++				await pending;
++				session.dispose();
++			}
++		},
++	);
++
++	it("admits the original configured default native Bash owner without replacing it", async () => {
++		const settingsManager = SettingsManager.inMemory({
++			shellPath: "/bin/sh",
++			shellCommandPrefix: "# configured default owner",
++			compaction: { enabled: false },
++			retry: { enabled: false },
++			cacheWarming: "off",
++		});
++		const modelRuntime = await ModelRuntime.create({
++			modelsPath: null,
++			refreshOnCreate: false,
++			allowModelNetwork: false,
++			authPath: join(agentDir, "auth.json"),
++		});
++		const faux = fauxProvider({ provider: "configured-default-admission", tokensPerSecond: Infinity });
++		modelRuntime.registerNativeProvider(faux.provider);
++		const command = "printf x >> default-effect; printf default-admitted";
++		const finalCommand = `# configured default owner\n${command}`;
++		const evaluate = vi.fn((plan: unknown) => {
++			expect(plan).toMatchObject({
++				command: finalCommand,
++				cwd: tempDir,
++				shell: "/bin/sh",
++				args: ["-c", finalCommand],
++				timeoutMs: 2000,
++			});
++			return "allow" as const;
++		});
++		const approve = vi.fn(async () => true);
++		const resourceLoader = new DefaultResourceLoader({
++			cwd: tempDir,
++			agentDir,
++			settingsManager,
++			noExtensions: true,
++			noSkills: true,
++			noThemes: true,
++			noPromptTemplates: true,
++			noContextFiles: true,
++			extensionFactories: [
++				(pi) => {
++					pi.on("tool_call", () => ({ admission: { isValid: () => true, evaluate, approve } }));
++				},
++			],
++		});
++		await resourceLoader.reload();
++		const { session } = await createAgentSession({
++			cwd: tempDir,
++			agentDir,
++			modelRuntime,
++			model: faux.getModel(),
++			settingsManager,
++			sessionManager: SessionManager.inMemory(tempDir),
++			resourceLoader,
++			tools: ["bash"],
++		});
++		const originalDefinition = session.getToolDefinition("bash");
++		const originalExecute = session.agent.state.tools.find((tool) => tool.name === "bash")!.execute;
++		const outcomes: Extract<AgentSessionEvent, { type: "tool_execution_end" }>[] = [];
++		session.subscribe((event) => {
++			if (event.type === "tool_execution_end") outcomes.push(event);
++		});
++		await session.bindExtensions({});
++		faux.setResponses([
++			fauxAssistantMessage([fauxToolCall("bash", { command, timeout: 2 })], { stopReason: "toolUse" }),
++			fauxAssistantMessage("done"),
++		]);
++		const spawn = vi.mocked(childProcess.spawn);
++		spawn.mockClear();
++		try {
++			await session.prompt("Run the harmless configured default owner.");
++			expect(session.getToolDefinition("bash")).toBe(originalDefinition);
++			expect(session.agent.state.tools.find((tool) => tool.name === "bash")!.execute).toBe(originalExecute);
++			expect(spawn.mock.calls.length).toBe(1);
++			expect(evaluate).toHaveBeenCalledTimes(1);
++			expect(approve).not.toHaveBeenCalled();
++			expect(spawn.mock.calls[0].slice(0, 2)).toEqual(["/bin/sh", ["-c", finalCommand]]);
++			expect(spawn.mock.calls[0][2]).toMatchObject({ cwd: tempDir });
++			expect(readFileSync(join(tempDir, "default-effect"), "utf8")).toBe("x");
++			expect(outcomes).toHaveLength(1);
++			expect(outcomes[0].isError).toBe(false);
++			expect(outcomes[0].result.structuredContent).toMatchObject({ output: "default-admitted", exit_code: 0 });
++		} finally {
++			session.dispose();
++		}
++	});
++
+ 	it("returns source metadata for SDK custom tools", async () => {
+ 		const settingsManager = SettingsManager.create(tempDir, agentDir);
+ 		const sessionManager = SessionManager.inMemory();

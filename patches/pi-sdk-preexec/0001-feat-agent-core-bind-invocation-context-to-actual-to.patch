@@ -1,0 +1,708 @@
+From 6cce67fca5d9ae8d3739dc9cff148f7f7aca4908 Mon Sep 17 00:00:00 2001
+From: Kozz36 <vjose8506@gmail.com>
+Date: Mon, 19 Oct 2026 18:27:45 -0500
+Subject: [PATCH 1/4] feat(agent-core): bind invocation context to actual tool
+ executors
+
+Introduce executor-bound invocation contexts and optional scope runners.
+Dispatch before forwarding and restore legacy state per invocation.
+Keep owner validity and concurrent/reused-ID tests with the contract.
+
+Retained evidence: SDK scoped 172 tests plus one independent public
+session-generation probe passed on the final candidate. No new campaign
+or execution of this intermediate repository snapshot is claimed.
+GP global remains RED; consultation causality remains UNKNOWN.
+No host activation, publication, global install or P01 operation.
+
+Risk: items 2 and 4 (authorization and invocation/concurrency isolation).
+---
+ packages/agent/src/agent-loop.ts              |  57 +++-
+ packages/agent/src/agent.ts                   |  28 +-
+ packages/agent/src/index.ts                   |   8 +
+ packages/agent/src/tool-execution-context.ts  | 151 +++++++++
+ packages/agent/src/types.ts                   |   5 +
+ .../agent/test/tool-execution-context.test.ts | 313 ++++++++++++++++++
+ 6 files changed, 552 insertions(+), 10 deletions(-)
+ create mode 100644 packages/agent/src/tool-execution-context.ts
+ create mode 100644 packages/agent/test/tool-execution-context.test.ts
+
+diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
+index f406aba5647adeb6d879a94d946a52436bfb6af3..3926b95cf6e15e5648b77409a476e0c9354f2990 100644
+--- a/packages/agent/src/agent-loop.ts
++++ b/packages/agent/src/agent-loop.ts
+@@ -16,6 +16,11 @@ import {
+ 	validateToolArguments,
+ } from "@earendil-works/pi-ai";
+ import { getDefaultStreamFn } from "./stream-fn.ts";
++import {
++	createToolExecutionContext,
++	runInToolExecutionScope,
++	type ToolExecutionAdmission,
++} from "./tool-execution-context.ts";
+ import type {
+ 	AgentContext,
+ 	AgentEvent,
+@@ -664,6 +669,9 @@ type PreparedToolCall = {
+ 	toolCall: AgentToolCall;
+ 	tool: AgentTool<any>;
+ 	args: unknown;
++	executor: AgentTool["execute"];
++	admission?: ToolExecutionAdmission;
++	isCurrent: () => boolean;
+ };
+ 
+ type ImmediateToolCallOutcome = {
+@@ -723,6 +731,9 @@ async function prepareToolCall(
+ 	}
+ 
+ 	try {
++		const executor = tool.execute;
++		const contextOwnsTools = tools === currentContext.tools;
++		let admission: ToolExecutionAdmission | undefined;
+ 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
+ 		const validatedArgs = validateToolArguments(tool, preparedToolCall);
+ 		if (config.beforeToolCall) {
+@@ -742,6 +753,10 @@ async function prepareToolCall(
+ 					isError: true,
+ 				};
+ 			}
++			if (beforeResult?.admission) {
++				const policy = beforeResult.admission;
++				admission = { isValid: policy.isValid, evaluate: policy.evaluate, approve: policy.approve };
++			}
+ 			if (beforeResult?.block) {
+ 				const result = createErrorToolResult(beforeResult.reason || "Tool execution was blocked");
+ 				if (beforeResult.terminate === true) {
+@@ -766,6 +781,12 @@ async function prepareToolCall(
+ 			toolCall,
+ 			tool,
+ 			args: validatedArgs,
++			executor,
++			admission,
++			isCurrent: () =>
++				tool.execute === executor &&
++				tools.find((candidate) => candidate.name === toolCall.name) === tool &&
++				(!contextOwnsTools || currentContext.tools === tools),
+ 		};
+ 	} catch (error) {
+ 		return {
+@@ -828,16 +849,33 @@ async function executePreparedToolCall(
+ 	const startedAt = performance.now();
+ 	const elapsed = () => Math.round(performance.now() - startedAt);
+ 
++	let executionContext: ReturnType<typeof createToolExecutionContext> | undefined;
+ 	try {
+-		const result = await prepared.tool.execute(
+-			prepared.toolCall.id,
+-			prepared.args as never,
+-			signal,
+-			(partialResult) => {
+-				if (!acceptingUpdates) return;
+-				updateEvents.push(Promise.resolve(onUpdate(partialResult)));
+-			},
+-		);
++		if (prepared.admission) {
++			executionContext = createToolExecutionContext(
++				prepared.executor,
++				prepared.admission,
++				() => !signal?.aborted && prepared.isCurrent(),
++			);
++		}
++		const update = (partialResult: AgentToolResult<unknown>) => {
++			if (!acceptingUpdates) return;
++			updateEvents.push(Promise.resolve(onUpdate(partialResult)));
++		};
++		const executor = executionContext ? prepared.executor : prepared.tool.execute;
++		const result = await runInToolExecutionScope(executor, executionContext, () => {
++			executionContext?.assertValid();
++			return executionContext
++				? Reflect.apply(executor, prepared.tool, [
++						prepared.toolCall.id,
++						prepared.args as never,
++						signal,
++						update,
++						executionContext,
++					])
++				: Reflect.apply(executor, prepared.tool, [prepared.toolCall.id, prepared.args as never, signal, update]);
++		});
++		executionContext?.finish();
+ 		const durationMs = elapsed();
+ 		acceptingUpdates = false;
+ 		await Promise.all(updateEvents);
+@@ -852,6 +890,7 @@ async function executePreparedToolCall(
+ 			durationMs,
+ 		};
+ 	} finally {
++		executionContext?.close();
+ 		acceptingUpdates = false;
+ 	}
+ }
+diff --git a/packages/agent/src/agent.ts b/packages/agent/src/agent.ts
+index ee8e6e59140b75a90d9afa0c4ef532465b2fc793..82106d845720fe5f02f6eae5bc0e976800fa669c 100644
+--- a/packages/agent/src/agent.ts
++++ b/packages/agent/src/agent.ts
+@@ -466,6 +466,7 @@ export class Agent {
+ 
+ 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
+ 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
++		const beforeToolCall = this.beforeToolCall;
+ 		return {
+ 			model: this._state.model,
+ 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
+@@ -477,7 +478,32 @@ export class Agent {
+ 			thinkingBudgets: this.thinkingBudgets,
+ 			maxRetryDelayMs: this.maxRetryDelayMs,
+ 			toolExecution: this.toolExecution,
+-			beforeToolCall: this.beforeToolCall,
++			beforeToolCall: beforeToolCall
++				? async (context, signal) => {
++						const tools = this._state.tools;
++						const registry = tools.map((tool) => ({ tool, executor: tool.execute }));
++						const sessionId = this.sessionId;
++						const result = await beforeToolCall(context, signal);
++						if (!result?.admission) return result;
++						const admission = { ...result.admission };
++						return {
++							...result,
++							admission: {
++								evaluate: admission.evaluate,
++								approve: admission.approve,
++								isValid: () =>
++									this._state.tools === tools &&
++									tools.length === registry.length &&
++									registry.every(
++										(entry, index) => tools[index] === entry.tool && entry.tool.execute === entry.executor,
++									) &&
++									this.sessionId === sessionId &&
++									this.beforeToolCall === beforeToolCall &&
++									admission.isValid(),
++							},
++						};
++					}
++				: undefined,
+ 			afterToolCall: this.afterToolCall,
+ 			finishTurn: this.finishTurn,
+ 			prepareRequest: this.prepareRequest,
+diff --git a/packages/agent/src/index.ts b/packages/agent/src/index.ts
+index ca00bc77726653ff4a84e6f021d70c3cd3d7bbd0..0b249779602f39e1373f683b82fc62d1a3c376a0 100644
+--- a/packages/agent/src/index.ts
++++ b/packages/agent/src/index.ts
+@@ -2,4 +2,12 @@ export * from "./agent.ts";
+ export * from "./agent-loop.ts";
+ export * from "./proxy.ts";
+ export { setDefaultStreamFn } from "./stream-fn.ts";
++export {
++	bindToolExecutionContext,
++	isToolExecutionContext,
++	registerToolExecutionContext,
++	type ToolExecutionAdmission,
++	type ToolExecutionContext,
++	type ToolExecutionDecision,
++} from "./tool-execution-context.ts";
+ export * from "./types.ts";
+diff --git a/packages/agent/src/tool-execution-context.ts b/packages/agent/src/tool-execution-context.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..908a4d3e81a9ce94db0010801ce54e74c285ed6d
+--- /dev/null
++++ b/packages/agent/src/tool-execution-context.ts
+@@ -0,0 +1,151 @@
++/** Host policy for one invocation. Never populate this from model arguments. */
++export type ToolExecutionDecision = "allow" | "deny" | "confirm";
++
++export interface ToolExecutionAdmission {
++	isValid: () => boolean;
++	/** Evaluate every final plan. Omission means confirmation is required. */
++	evaluate?: (plan: unknown, presentationContext?: unknown) => ToolExecutionDecision | Promise<ToolExecutionDecision>;
++	approve: (plan: unknown, presentationContext?: unknown) => Promise<boolean>;
++}
++
++/** Per-invocation state passed only to opted-in executors. */
++export interface ToolExecutionContext {
++	assertValid(executor?: object): void;
++	admit(plan: unknown, presentationContext?: unknown, canConfirm?: () => boolean): Promise<void>;
++}
++
++// Capability bindings, not approvals. Bindings identify actual function objects.
++type NativeInvocationScope = <T>(context: ToolExecutionContext | undefined, invoke: () => Promise<T>) => Promise<T>;
++
++interface Binding {
++	valid: () => boolean;
++	delegate?: object;
++	scope?: NativeInvocationScope;
++}
++const bindings = new WeakMap<object, Binding>();
++// Native lifecycle hooks, not invocation/approval storage. Clear every known carrier
++// on entry, including when an unbound legacy executor is nested in a guarded call.
++const nativeScopes = new Set<NativeInvocationScope>();
++
++/**
++ * Privileged native backend registration. Not a sandbox against extension code.
++ * The backend must await admit at its final effect boundary and execute once.
++ * An optional native scope must isolate async work, clear on undefined, and restore
++ * the caller on return/throw. It is lifecycle evidence, never ambient approval.
++ */
++export function registerToolExecutionContext(
++	executor: object,
++	isValid: () => boolean,
++	scope?: NativeInvocationScope,
++): void {
++	if (typeof executor !== "function") throw new Error("Expected an executor function");
++	bindings.set(executor, { valid: isValid, scope });
++	if (scope) nativeScopes.add(scope);
++}
++
++/** Bind a known forwarding function to its exact delegate, not metadata or a tool ID. */
++export function bindToolExecutionContext(executor: object, delegate: object, isValid: () => boolean): void {
++	const binding = bindings.get(delegate);
++	if (!binding) return;
++	if (typeof executor !== "function") throw new Error("Expected an executor function");
++	bindings.set(executor, {
++		delegate,
++		scope: binding.scope,
++		valid: () => bindings.get(delegate) === binding && binding.valid() && isValid(),
++	});
++}
++
++/** @internal Enter before forwarding; the native carrier owns async isolation/restoration. */
++export function runInToolExecutionScope<T>(
++	executor: object,
++	context: ToolExecutionContext | undefined,
++	invoke: () => Promise<T>,
++): Promise<T> {
++	context?.assertValid(executor);
++	const selected = bindings.get(executor)?.scope;
++	const scopes = [...nativeScopes];
++	const enter = (index: number): Promise<T> => {
++		const scope = scopes[index];
++		return scope ? scope(scope === selected ? context : undefined, () => enter(index + 1)) : invoke();
++	};
++	return enter(0);
++}
++
++class InvocationContext implements ToolExecutionContext {
++	#consumed = false;
++	#pending = false;
++	#active = true;
++	#valid: () => boolean;
++	#executors: readonly object[];
++	#admission: ToolExecutionAdmission;
++
++	constructor(admission: ToolExecutionAdmission, valid: () => boolean, executors: readonly object[]) {
++		// Pin callbacks so mutation of a returned hook object cannot change policy.
++		this.#admission = { isValid: admission.isValid, evaluate: admission.evaluate, approve: admission.approve };
++		this.#valid = valid;
++		this.#executors = executors;
++	}
++
++	assertValid(executor?: object): void {
++		if (executor && !this.#executors.includes(executor))
++			throw new Error("Executor is outside the bound admission path");
++		if (!this.#active || !this.#valid() || !this.#admission.isValid()) {
++			throw new Error("Tool execution admission is stale or cancelled");
++		}
++	}
++
++	async admit(plan: unknown, presentationContext?: unknown, canConfirm: () => boolean = () => true): Promise<void> {
++		this.assertValid();
++		if (this.#pending || this.#consumed) throw new Error("Tool execution admission already used");
++		this.#pending = true;
++		const decision = await (this.#admission.evaluate?.(plan, presentationContext) ?? "confirm");
++		this.assertValid();
++		if (decision !== "allow") {
++			if (decision !== "confirm") throw new Error("Final execution policy denied");
++			if (!canConfirm()) throw new Error("Final admission requires UI context");
++			if ((await this.#admission.approve(plan, presentationContext)) !== true) {
++				throw new Error("Tool execution admission denied");
++			}
++			this.assertValid();
++			if (!canConfirm()) throw new Error("Final admission UI is no longer available");
++		}
++		this.#consumed = true;
++	}
++
++	finish(): void {
++		this.assertValid();
++		if (!this.#consumed) throw new Error("Executor did not request final admission");
++	}
++
++	close(): void {
++		this.#active = false;
++	}
++}
++
++/** @internal Dispatcher-owned construction. */
++export function createToolExecutionContext(
++	executor: object,
++	admission: ToolExecutionAdmission,
++	valid: () => boolean,
++): InvocationContext {
++	const binding = bindings.get(executor);
++	if (!binding) throw new Error("Executor does not support final admission");
++	const executors: object[] = [];
++	let current: object | undefined = executor;
++	while (current) {
++		if (executors.includes(current)) throw new Error("Cyclic execution context binding");
++		executors.push(current);
++		current = bindings.get(current)?.delegate;
++	}
++	const context = new InvocationContext(
++		admission,
++		() => bindings.get(executor) === binding && binding.valid() && valid(),
++		executors,
++	);
++	context.assertValid();
++	return context;
++}
++
++export function isToolExecutionContext(value: unknown): value is ToolExecutionContext {
++	return value instanceof InvocationContext;
++}
+diff --git a/packages/agent/src/types.ts b/packages/agent/src/types.ts
+index dbfba74a084f71951e48285869730b70a405ba3a..9453ee3713b070f2ba3b434bb586789bd0de8125 100644
+--- a/packages/agent/src/types.ts
++++ b/packages/agent/src/types.ts
+@@ -15,6 +15,7 @@ import type {
+ 	Usage,
+ } from "@earendil-works/pi-ai";
+ import type { Static, TSchema } from "typebox";
++import type { ToolExecutionAdmission } from "./tool-execution-context.ts";
+ 
+ /**
+  * Stream function used by the agent loop. `Models.streamSimple` satisfies
+@@ -64,6 +65,8 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
+  * `reason` becomes the text shown in that error result. If omitted, a default blocked message is used.
+  */
+ export interface BeforeToolCallResult {
++	/** Require final, executor-bound admission. Unsupported executors fail before invocation. */
++	admission?: ToolExecutionAdmission;
+ 	block?: boolean;
+ 	reason?: string;
+ 	/**
+@@ -485,6 +488,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
+ 		params: Static<TParameters>,
+ 		signal?: AbortSignal,
+ 		onUpdate?: AgentToolUpdateCallback<TDetails>,
++		/** Opaque host context. Native opt-in executors narrow with isToolExecutionContext(). */
++		executionContext?: unknown,
+ 	) => Promise<AgentToolResult<TDetails>>;
+ 	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
+ 	replay?: "never" | "safe";
+diff --git a/packages/agent/test/tool-execution-context.test.ts b/packages/agent/test/tool-execution-context.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb5ef2062f8ec28b75d5929e583354b41f829570
+--- /dev/null
++++ b/packages/agent/test/tool-execution-context.test.ts
+@@ -0,0 +1,313 @@
++import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
++import { Type } from "typebox";
++import { expect, it } from "vitest";
++import { Agent } from "../src/agent.ts";
++import { runToolCall } from "../src/agent-loop.ts";
++import type { ToolExecutionContext } from "../src/tool-execution-context.ts";
++import {
++	bindToolExecutionContext,
++	isToolExecutionContext,
++	registerToolExecutionContext,
++} from "../src/tool-execution-context.ts";
++import type { AgentTool } from "../src/types.ts";
++
++const assistantMessage: AssistantMessage = {
++	role: "assistant",
++	content: [],
++	api: "openai-responses",
++	provider: "openai",
++	model: "mock",
++	usage: {
++		input: 0,
++		output: 0,
++		cacheRead: 0,
++		cacheWrite: 0,
++		totalTokens: 0,
++		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
++	},
++	stopReason: "toolUse",
++	timestamp: 0,
++};
++
++it("rejects required final admission before invoking an unknown executor", async () => {
++	let executions = 0;
++	const tool: AgentTool = {
++		name: "bash",
++		label: "bash",
++		description: "instrumented",
++		parameters: Type.Object({}),
++		execute: async () => {
++			executions++;
++			return { content: [], details: undefined };
++		},
++	};
++	const outcome = await runToolCall(
++		{ type: "toolCall", id: "same", name: "bash", arguments: {} },
++		{
++			tools: [tool],
++			context: { messages: [], tools: [tool] },
++			assistantMessage,
++			beforeToolCall: async () => ({ block: false, admission: { isValid: () => true, approve: async () => true } }),
++		},
++	);
++	expect(executions).toBe(0);
++	expect(outcome.isError).toBe(true);
++});
++
++it("preserves the four-argument legacy call and receiver", async () => {
++	let actualArgs = 0;
++	let receiver: unknown;
++	const tool: AgentTool = {
++		name: "legacy",
++		label: "legacy",
++		description: "legacy",
++		parameters: Type.Object({}),
++		async execute(...args: Parameters<AgentTool["execute"]>) {
++			actualArgs = args.length;
++			receiver = this;
++			return { content: [], details: undefined };
++		},
++	};
++	const result = await runToolCall(
++		{ type: "toolCall", id: "same", name: "legacy", arguments: {} },
++		{
++			tools: [tool],
++			context: { messages: [], tools: [tool] },
++			assistantMessage,
++		},
++	);
++	expect(result.isError).toBe(false);
++	expect(actualArgs).toBe(4);
++	expect(receiver).toBe(tool);
++});
++
++it("rejects copied metadata and a replaced bound delegate before invoking either executor", async () => {
++	let calls = 0;
++	const native: AgentTool = {
++		name: "bash",
++		label: "bash",
++		description: "instrumented",
++		parameters: Type.Object({}),
++		execute: async () => {
++			calls++;
++			return { content: [], details: undefined };
++		},
++	};
++	registerToolExecutionContext(native.execute, () => true);
++	const delegate = native.execute;
++	const wrapper: AgentTool = {
++		...native,
++		execute: (id, params, signal, update, context) => native.execute(id, params, signal, update, context),
++	};
++	bindToolExecutionContext(wrapper.execute, delegate, () => native.execute === delegate);
++	const result = await runToolCall(
++		{ type: "toolCall", id: "same", name: "bash", arguments: {} },
++		{
++			tools: [wrapper],
++			context: { messages: [], tools: [wrapper] },
++			assistantMessage,
++			beforeToolCall: async () => {
++				native.execute = async () => {
++					calls++;
++					return { content: [], details: undefined };
++				};
++				return { admission: { isValid: () => true, approve: async () => true } };
++			},
++		},
++	);
++	expect(result.isError).toBe(true);
++	expect(calls).toBe(0);
++});
++
++it.each(["return", "throw", "cancel"])("clears nested legacy scope and exits native scope after %s", async (mode) => {
++	const events: { phase: string; context: ToolExecutionContext | undefined }[] = [];
++	let frame: unknown;
++	let nestedArgs = 0;
++	const abort = new AbortController();
++	const legacy: AgentTool = {
++		name: "legacy",
++		label: "legacy",
++		description: "legacy",
++		parameters: Type.Object({}),
++		async execute(...args: Parameters<AgentTool["execute"]>) {
++			nestedArgs = args.length;
++			expect(this).toBe(legacy);
++			expect(events.at(-1)).toEqual({ phase: "enter", context: undefined });
++			if (mode === "throw") throw new Error("owned nested error");
++			if (mode === "cancel") abort.abort();
++			return { content: [], details: undefined };
++		},
++	};
++	const tools: AgentTool[] = [legacy];
++	const native: AgentTool = {
++		name: "native",
++		label: "native",
++		description: "native",
++		parameters: Type.Object({}),
++		execute: async (_id, _params, _signal, _update, context) => {
++			frame = context;
++			expect(events.at(-1)).toEqual({ phase: "enter", context });
++			const nested = await runToolCall(
++				{ type: "toolCall", id: "reused", name: "legacy", arguments: {} },
++				{
++					tools,
++					context: { messages: [], tools },
++					assistantMessage,
++				},
++			);
++			expect(nested.isError).toBe(mode === "throw");
++			expect(events.at(-1)).toEqual({ phase: "exit", context: undefined });
++			if (!isToolExecutionContext(context)) throw new Error("Missing host context");
++			await context.admit({ command: "harmless" });
++			return { content: [], details: undefined };
++		},
++	};
++	const scope = async <T>(context: ToolExecutionContext | undefined, invoke: () => Promise<T>): Promise<T> => {
++		events.push({ phase: "enter", context });
++		try {
++			return await invoke();
++		} finally {
++			events.push({ phase: "exit", context });
++		}
++	};
++	registerToolExecutionContext(native.execute, () => true, scope);
++	const delegate = native.execute;
++	const forwarder: AgentTool = {
++		...native,
++		execute: (id, args, signal, update, context) => native.execute(id, args, signal, update, context),
++	};
++	bindToolExecutionContext(forwarder.execute, delegate, () => native.execute === delegate);
++	tools.push(forwarder);
++	const result = await runToolCall(
++		{ type: "toolCall", id: "reused", name: "native", arguments: {} },
++		{
++			tools,
++			context: { messages: [], tools },
++			assistantMessage,
++			signal: abort.signal,
++			beforeToolCall: async () => ({ admission: { isValid: () => true, approve: async () => true } }),
++		},
++	);
++	expect(result.isError).toBe(mode === "cancel");
++	expect(nestedArgs).toBe(4);
++	expect(events).toEqual([
++		{ phase: "enter", context: frame },
++		{ phase: "enter", context: undefined },
++		{ phase: "exit", context: undefined },
++		{ phase: "exit", context: frame },
++	]);
++	const completed = frame;
++	if (!isToolExecutionContext(completed)) throw new Error("Missing completed context");
++	expect(() => completed.assertValid()).toThrow("stale");
++});
++
++it("isolates concurrent native scopes and explicit legacy entry with reused call IDs", async () => {
++	const entries: (ToolExecutionContext | undefined)[] = [];
++	const matches: boolean[] = [];
++	let starts = 0;
++	let ready!: () => void;
++	let release!: (answer: boolean) => void;
++	const waiting = new Promise<void>((resolve) => {
++		ready = resolve;
++	});
++	const tool: AgentTool = {
++		name: "native",
++		label: "native",
++		description: "native",
++		parameters: Type.Object({}),
++		execute: async (_id, _args, _signal, _update, context) => {
++			matches.push(entries.at(-1) === context);
++			if (isToolExecutionContext(context)) await context.admit({ command: "harmless" });
++			starts++;
++			return { content: [], details: undefined };
++		},
++	};
++	registerToolExecutionContext(
++		tool.execute,
++		() => true,
++		async <T>(context: ToolExecutionContext | undefined, invoke: () => Promise<T>) => {
++			entries.push(context);
++			return invoke();
++		},
++	);
++	const options = { tools: [tool], context: { messages: [], tools: [tool] }, assistantMessage };
++	const call = { type: "toolCall" as const, id: "same", name: "native", arguments: {} };
++	const first = runToolCall(call, {
++		...options,
++		beforeToolCall: async () => ({
++			admission: {
++				isValid: () => true,
++				approve: async () => {
++					const answer = new Promise<boolean>((resolve) => {
++						release = resolve;
++					});
++					ready();
++					return answer;
++				},
++			},
++		}),
++	});
++	await waiting;
++	const denied = await runToolCall(call, {
++		...options,
++		beforeToolCall: async () => ({ admission: { isValid: () => true, approve: async () => false } }),
++	});
++	const legacy = await runToolCall(call, options);
++	expect(denied.isError).toBe(true);
++	expect(legacy.isError).toBe(false);
++	expect(starts).toBe(1);
++	release(true);
++	expect((await first).isError).toBe(false);
++	expect(starts).toBe(2);
++	expect(entries).toHaveLength(3);
++	expect(entries[0]).not.toBe(entries[1]);
++	expect(entries[2]).toBeUndefined();
++	expect(matches).toEqual([true, true, true]);
++});
++
++it.each(["replace", "mutate"])("invalidates an Agent registry %s during approval", async (mode) => {
++	let starts = 0;
++	const tool: AgentTool = {
++		name: "bash",
++		label: "bash",
++		description: "instrumented",
++		parameters: Type.Object({}),
++		execute: async (_id, _params, _signal, _update, context) => {
++			if (!isToolExecutionContext(context)) throw new Error("Missing host context");
++			await context.admit(Object.freeze({ command: "harmless" }));
++			starts++;
++			return { content: [], details: undefined };
++		},
++	};
++	registerToolExecutionContext(tool.execute, () => true);
++	const agent = new Agent({
++		initialState: { tools: [tool] },
++		streamFn: () => {
++			const stream = createAssistantMessageEventStream();
++			queueMicrotask(() =>
++				stream.push({
++					type: "done",
++					reason: "toolUse",
++					message: {
++						...assistantMessage,
++						content: [{ type: "toolCall", id: "same", name: "bash", arguments: {} }],
++					},
++				}),
++			);
++			return stream;
++		},
++		beforeToolCall: async () => ({
++			admission: {
++				isValid: () => true,
++				approve: async () => {
++					if (mode === "replace") agent.state.tools = [tool];
++					else agent.state.tools[0] = { ...tool };
++					return true;
++				},
++			},
++		}),
++		finishTurn: async () => ({ action: "end" }),
++	});
++	await agent.prompt("probe");
++	expect(starts).toBe(0);
++});
