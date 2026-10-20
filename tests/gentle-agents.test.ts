@@ -6540,7 +6540,8 @@ test("session shutdown never hangs on a job whose process ignores the stop", { t
 	const dir = mkdtempSync(join(tmpdir(), "gentle-jobs-stuck-"));
 	// A process that never exits, even after its abort signal.
 	const stuck = () => ({ operations: { exec: () => new Promise<{ exitCode: number | null }>(() => {}) } });
-	const schedule: AgentsDeps["schedule"] = (fn, ms) => { const timer = setTimeout(fn, Math.min(ms, 10)); timer.unref(); return () => clearTimeout(timer); };
+	// The fake exec has no process handle; keep its shutdown grace deadline referenced.
+	const schedule: AgentsDeps["schedule"] = (fn, ms) => { const timer = setTimeout(fn, Math.min(ms, 10)); return () => clearTimeout(timer); };
 	gentleAgents(pi, {}, { ...deps().deps, schedule, jobShell: stuck });
 	const { ctx } = fakeContext();
 	try {

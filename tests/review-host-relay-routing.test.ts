@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import childProcess, { execFileSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +12,7 @@ import { createProfile, emptyProfilesFile, profilesFilePath, writeProfilesFileSy
 import type { AgentModelConfig } from "../lib/model-routing-authority.ts";
 import { GENTLE_AI_DEV_BINARY_ENV, resolveGentleAiDevBinaryOverride } from "../lib/gentle-ai-binary.ts";
 import { NativeReviewIntegrationError, type NativeReviewCli, type NativeReviewUnachievableLensCaptureArtifact, type NativeReviewUnachievableLensCaptureRequest } from "../lib/native-review-cli.ts";
-import { REVIEW_HOST_RELAY_FAILURE, REVIEW_HOST_RELAY_PI_TIMEOUT_ENV, REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS, REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE, REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE, ReviewHostRelayError, type ReviewHostRelayRequest } from "../lib/review-host-relay.ts";
+import { REVIEW_HOST_RELAY_FAILURE, REVIEW_HOST_RELAY_PI_TIMEOUT_ENV, REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS, REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE, REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE, ReviewHostRelayError, runReviewHostRelaySlot, runReviewHostRelayReviewerGroup, type ReviewHostRelayRequest } from "../lib/review-host-relay.ts";
 import { decodeReviewFailureV2, decodeReviewNextTransitionV3, decodeReviewStatusV3, type ReviewArtifactSubjectV2, type ReviewCaptureSubmissionV1, type ReviewCollectInputV3, type ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 import type { InProcessReviewerRegistry } from "../lib/inprocess-reviewer.ts";
 
@@ -409,6 +410,15 @@ test("a missing review-refuter routing model is refused typed, naming the key, b
 	const lineageId = "relay-role-missing-model";
 	const input = hostMediatedRefuterCollectInput(lineageId);
 	const harness = nativeHarness([finalizeStatus(lineageId, [input])]);
+	const launches = t.mock.method(childProcess, "spawn", () => { throw new Error("Unexpected native or reviewer launch"); });
+	syncBuiltinESMExports();
+	t.after(() => { __testing.setReviewHostRelayRunnerForTesting(); t.mock.restoreAll(); syncBuiltinESMExports(); });
+	// This negative validation never executes the path. Do not depend on an installed Go binary.
+	let validations = 0;
+	__testing.setReviewHostRelayRunnerForTesting((request) => {
+		validations++;
+		return runReviewHostRelaySlot({ ...request, gentleAiExecutable: process.execPath });
+	});
 
 	const result = await runCapture(cwd, harness, lineageId);
 
@@ -416,6 +426,8 @@ test("a missing review-refuter routing model is refused typed, naming the key, b
 	const failure = result.failure as { kind?: string } | undefined;
 	assert.equal(failure?.kind, "reviewer-config-invalid");
 	assert.match(String(result.reason), /review-refuter/);
+	assert.equal(validations, 1, "the real relay validation must run");
+	assert.equal(launches.mock.callCount(), 0, "missing selection must not launch any process");
 });
 
 test("Pi-authored review documents are rejected at the capture input boundary", async (t) => {
@@ -1391,6 +1403,15 @@ test("a pinned profile missing a required group role is refused typed before any
 		getApiKeyAndHeaders: async () => { authAttempts += 1; return { ok: true }; },
 	};
 
+	const launches = t.mock.method(childProcess, "spawn", () => { throw new Error("Unexpected native or reviewer launch"); });
+	syncBuiltinESMExports();
+	t.after(() => { __testing.setReviewHostRelayGroupRunnersForTesting(); t.mock.restoreAll(); syncBuiltinESMExports(); });
+	// Keep real group validation, but remove an unused package-local binary prerequisite.
+	let validations = 0;
+	__testing.setReviewHostRelayGroupRunnersForTesting((requests) => {
+		validations += requests.length;
+		return runReviewHostRelayReviewerGroup(requests.map((request) => ({ ...request, gentleAiExecutable: process.execPath })));
+	});
 	const result = await runCaptureGroup(cwd, harness, lineageId, inputs, true, registry);
 
 	assert.equal(result.outcome, "pi-host-relay-transport-failure");
@@ -1399,4 +1420,6 @@ test("a pinned profile missing a required group role is refused typed before any
 	assert.match(String(result.reason), /no model is configured for review-resilience/, "whole-profile precedence: models.json must not fill the pinned profile's gaps");
 	assert.equal(modelLookups, 0, "the typed refusal fires before any model resolution");
 	assert.equal(authAttempts, 0, "the typed refusal fires before any provider auth");
+	assert.equal(validations, 1, "the real group validation must run");
+	assert.equal(launches.mock.callCount(), 0, "missing selection must not launch any process");
 });

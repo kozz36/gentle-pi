@@ -40,6 +40,9 @@ test("CodeGraph tool rejects non-project, nested-project, HOME, and temporary wo
 });
 
 test("CodeGraph query timeout is reported distinctly from user abort and never bounds init (#1901)", async (t) => {
+	// The fake exec has no child-process handle to keep AbortSignal.timeout alive.
+	const processHandle = setInterval(() => {}, 1000);
+	t.after(() => clearInterval(processHandle));
 	const cwd = workspace(t);
 	const ctx = { cwd } as ExtensionContext;
 	// Behaves like execFile: settles only when its signal aborts, then rejects with AbortError.
