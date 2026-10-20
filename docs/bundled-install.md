@@ -4,6 +4,14 @@ Gentle Shell installs as one self-contained product. It carries its own pinned N
 
 The building blocks live in `scripts/bundled-install.mjs`. The web installer and `gentle-shell upgrade` share them. The web installer uses them for a new installation of the release channel ([bundled installation](install-wizard.md#bundled-installation)). The launcher and `gentle-shell upgrade` use them in a bundled install ([Launcher in a bundled install](#launcher-in-a-bundled-install)).
 
+## Development-only final Bash admission
+
+The isolated pre-execution admission integration does **not** change the installer, launcher, lockfile, active SDK or current release. Its patched SDK is a read-only development dependency; do not infer activation from the source changes.
+
+Supported native admission includes canonical SDK Bash definitions with the standard local backend, including the original default quiet-profile owner. `requireAdmission: true` additionally rejects direct context-free calls; dispatcher eligibility does not depend on that flag. The adapter's directly loaded pinned pi-pretty implementation retains the strict option and has established forwarding provenance.
+
+A supplied bundled extension function is opaque to this adapter: creating a genuine SDK tool or copying its metadata does not establish that another registered executor forwards to it. Old SDKs, unknown executors and custom backends remain unsupported. Such paths fail closed rather than acquiring approval capability or being silently replaced. See [restricted final Bash admission](permission-modes.md#restricted-final-bash-admission-isolated-development).
+
 ## Layout
 
 | Path (POSIX) | Contents |

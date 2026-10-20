@@ -1,3 +1,4 @@
+import { finalBashPlan, finalBashPresentation, nativeAdmissionSdk, type FinalBashPlan } from "../lib/bash-preexec-admission.ts";
 import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
 import { dataArgumentRanges, recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
 import { defaultTempScratchFs, isTempScratchRemoval, type TempScratchFs } from "../lib/yolo-temp-scratch.ts";
@@ -2077,6 +2078,8 @@ async function confirmCommand(
 	herdrLifecycle: HerdrConfirmationLifecycle,
 	yoloActive = false,
 	autoGate?: () => Promise<ToolCallEventResult | undefined>,
+	finalPlan?: FinalBashPlan,
+	deferConfirmation?: () => void,
 ): Promise<ToolCallEventResult | undefined> {
 	const guardrailsConfig = loadRuntimeGuardrailsConfig(ctx.cwd);
 	const evaluation = evaluateGuardedCommand(command, guardrailsConfig);
@@ -2123,6 +2126,8 @@ async function confirmCommand(
 	// Full T1 evaluation has already run. YOLO never changes persistent autonomy.
 	if (yoloActive && configuredRestriction === undefined && isReversibleYoloCommand(command, evaluation)) return undefined;
 
+	// Native evaluation separates policy from the final affirmative decision.
+	if (deferConfirmation) { deferConfirmation(); return undefined; }
 	// classification === "confirm"
 	if (!ctx.hasUI) {
 		return {
@@ -2134,7 +2139,7 @@ async function confirmCommand(
 	const title = evaluation.dataLoss
 		? "Allow recognized data-loss command?"
 		: guardedCommandTitle(evaluation.key, evaluation.matches);
-	const preview = guardedCommandPreview(command, evaluation.triggerIndex);
+	const preview = finalPlan ? finalBashPresentation(finalPlan) : guardedCommandPreview(command, evaluation.triggerIndex);
 	const requestId = randomUUID();
 	const emitPermissionRequest = (
 		state: "waiting" | "approved" | "denied",
@@ -9626,6 +9631,8 @@ export const __testing = {
 	orderDiscoverableAgents,
 	classifyGuardedCommand,
 	evaluateGuardedCommand,
+	confirmCommand,
+	createHerdrConfirmationLifecycle,
 	guardedCommandPreview,
 	guardedCommandTitle,
 	loadRuntimeGuardrailsConfig,
@@ -10525,8 +10532,49 @@ function createGentleAiExtensionForTesting(
 		if (primaryToolCall && modeEpoch !== yolo.epoch()) {
 			return { block: true, reason: "Permission mode changed during tool admission. This action was not run; retry under the current mode." };
 		}
-		const autoGate = permissionMode === "auto" ? gate : undefined;
-		return await confirmCommand(command, ctx, pi.events, herdrLifecycle, yoloActive, autoGate);
+		if (typeof nativeAdmissionSdk.bindToolExecutionContext !== "function") {
+			return { block: true, reason: "Gentle AI requires native final Bash admission support. This action was not run." };
+		}
+		const ownerCwd = ctx.cwd;
+		const ownerManager = ctx.sessionManager;
+		const lifetime = reminderEpoch;
+		// Bind policy to its owner, not to configuration under a transformed target cwd.
+		const policyFingerprint = () => JSON.stringify([
+			loadRuntimeGuardrailsConfig(ownerCwd),
+			Object.values(GUARDED_COMMAND_KEY).map(key => yoloConfiguredRestriction(ownerCwd, [key])),
+		]);
+		const policy = policyFingerprint();
+		const isValid = () => reminderSessionActive && reminderEpoch === lifetime
+			&& ctx.sessionManager === ownerManager && ctx.cwd === ownerCwd
+			&& yolo.epoch() === modeEpoch && policyFingerprint() === policy;
+		const check = async (value: unknown, defer?: () => void) => {
+			const plan = finalBashPlan(value);
+			if (!plan || !isValid()) return { block: true, reason: "Final Bash admission is invalid or stale." };
+			if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") {
+				const denied = blockChildDestructiveCommand(plan.command);
+				if (denied) return denied;
+			}
+			// Auto sees final values, while permission/config authority stays at ownerCwd.
+			const finalGate = permissionMode === "auto" ? async () => {
+				try { return await auto.check({ ...event, input: { ...event.input, command: plan.command, timeout: plan.timeoutMs === undefined ? undefined : plan.timeoutMs / 1000 } }, ctx, primaryToolCall); }
+				catch { return { block: true, reason: "Auto permission checking failed. This action was not run; do not bypass the check." }; }
+			} : undefined;
+			return confirmCommand(plan.command, ctx, pi.events, herdrLifecycle, yoloActive, finalGate, plan, defer);
+		};
+		// Explicit compatibility with SDK 1.2 declarations; the optional native
+		// capability check above is mandatory before returning this 1.3 contract.
+		return Object.assign({} as ToolCallEventResult, {
+			admission: {
+				isValid,
+				evaluate: async (plan: unknown) => {
+					let confirmation = false;
+					const denied = await check(plan, () => { confirmation = true; });
+					if (denied?.block) throw new Error(denied.reason);
+					return confirmation ? "confirm" as const : "allow" as const;
+				},
+				approve: async (plan: unknown) => !(await check(plan))?.block && isValid(),
+			},
+		});
 	});
 
 	for (const owner of ["delegation", "review"] as const) {

@@ -55,6 +55,15 @@ function confirmationObserver() {
 	};
 }
 
+// Policy/presentation unit tests do not impersonate the native dispatcher.
+// Public execution enforcement is covered in bash-preexec-admission.test.ts.
+function confirmationPolicy(pi: ExtensionAPI) {
+	const lifecycle = __testing.createHerdrConfirmationLifecycle(pi.events);
+	return (event: { toolName?: string; input: unknown }, ctx: ExtensionContext) => __testing.confirmCommand(
+		(event.input as { command: string }).command, ctx, pi.events, lifecycle,
+	);
+}
+
 function writeMarkdown(path: string, content: string): void {
 	mkdirSync(dirname(path), { recursive: true });
 	writeFileSync(path, content);
@@ -1324,7 +1333,7 @@ test("model panel render uses the Pi-provided current theme when supplied", () =
 	assert.match(stripAnsi(rendered), /Assign Models and Effort to Agents/);
 });
 
-test("delivery commands bypass RDD under every mode outcome while command safety remains independent", async () => {
+test("delivery commands fail closed without native admission regardless of RDD mode", async () => {
 	type ToolCallHandler = (
 		event: { toolName: string; input: unknown },
 		ctx: ExtensionContext,
@@ -1367,7 +1376,10 @@ test("delivery commands bypass RDD under every mode outcome while command safety
 
 		for (const command of commands) {
 			const result = await toolCall!({ toolName: "bash", input: { command } }, ctx);
-			assert.equal(result, undefined, `${mode.label}: ${command}`);
+			assert.deepEqual(result, {
+				block: true,
+				reason: "Gentle AI requires native final Bash admission support. This action was not run.",
+			}, `${mode.label}: ${command}`);
 		}
 	}
 });
@@ -1415,8 +1427,7 @@ test("guarded command confirmation emits a generic correlated permission lifecyc
 		registerTool() {},
 	} as unknown as ExtensionAPI;
 	createGentleAiExtension({ processEnv: { GENTLE_PI_AGENTS_CHILD: "0" }, nativeReviewCli: null })(pi);
-	const toolCall = handlers.get("tool_call");
-	assert.equal(typeof toolCall, "function");
+	const toolCall = confirmationPolicy(pi);
 	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-permission-request-"));
 	try {
 		const ctx = {
@@ -1552,7 +1563,8 @@ test("concurrent guarded confirmations coalesce the Herdr lifecycle per extensio
 			registerTool() {},
 		} as unknown as ExtensionAPI;
 		createGentleAiExtension({ processEnv: { GENTLE_PI_AGENTS_CHILD: "0" }, nativeReviewCli: null })(pi);
-		return { handlers, emitted, confirmations, confirmation };
+		const policy = confirmationPolicy(pi);
+		return { policy, handlers, emitted, confirmations, confirmation };
 	};
 	const first = createHarness();
 	const second = createHarness();
@@ -1568,8 +1580,8 @@ test("concurrent guarded confirmations coalesce the Herdr lifecycle per extensio
 				}),
 			},
 		} as unknown as ExtensionContext);
-		const firstRequest = first.handlers.get("tool_call")!({ toolName: "bash", input: { command: "git rebase main" } }, context(first.confirmations));
-		const secondRequest = first.handlers.get("tool_call")!({ toolName: "bash", input: { command: "git rebase main --another-command" } }, context(first.confirmations));
+		const firstRequest = first.policy({ input: { command: "git rebase main" } }, context(first.confirmations));
+		const secondRequest = first.policy({ input: { command: "git rebase main --another-command" } }, context(first.confirmations));
 		await first.confirmation.waitFor(2);
 		assert.deepEqual(first.emitted.map(({ channel, data }) => ({ channel, state: data.state, active: data.active })), [
 			{ channel: "pi-permission-system:permission-request", state: "waiting", active: undefined },
@@ -1592,7 +1604,7 @@ test("concurrent guarded confirmations coalesce the Herdr lifecycle per extensio
 			{ channel: "pi-permission-system:permission-request", state: "denied", active: undefined },
 		]);
 
-		const independentRequest = second.handlers.get("tool_call")!({ toolName: "bash", input: { command: "git rebase main --independent-command" } }, context(second.confirmations));
+		const independentRequest = second.policy({ input: { command: "git rebase main --independent-command" } }, context(second.confirmations));
 		await second.confirmation.waitFor(1);
 		assert.equal(second.emitted.filter(({ channel }) => channel === "herdr:blocked").length, 1);
 		assert.equal(second.emitted.find(({ channel }) => channel === "herdr:blocked")?.data.active, true);
@@ -1728,7 +1740,7 @@ test("Herdr preserves the initial label and balanced edges across overlapping so
 				confirm: async () => new Promise<boolean>((resolve) => { confirmations.push(resolve); confirmation.observe(); }),
 			},
 		} as unknown as ExtensionContext;
-		return { confirmations, confirmation, context, herdrEvents, pi, toolCall: handlers.get("tool_call")! };
+		return { confirmations, confirmation, context, herdrEvents, pi, toolCall: confirmationPolicy(pi) };
 	};
 
 	const guardedFirst = createHarness();
@@ -1819,6 +1831,7 @@ test("closed choice blockers retain the visible choice label through guarded-con
 	} as unknown as ExtensionAPI;
 	createGentleAiExtension({ processEnv: { GENTLE_PI_AGENTS_CHILD: "0" }, nativeReviewCli: null })(pi);
 	assert.equal(eventHandlers.has("gentle-pi:ask-user-choice:blocked"), true);
+	const policy = confirmationPolicy(pi);
 
 	for (const malformed of [null, [], {}, { active: "true" }]) {
 		pi.events.emit("gentle-pi:ask-user-choice:blocked", malformed);
@@ -1829,8 +1842,8 @@ test("closed choice blockers retain the visible choice label through guarded-con
 	assert.deepEqual(choiceEvents, [{ active: true }]);
 	assert.deepEqual(herdrEvents, [{ active: true, label: "Choice awaiting input" }]);
 
-	const guardedRequest = handlers.get("tool_call")!(
-		{ toolName: "bash", input: { command: "git rebase main" } },
+	const guardedRequest = policy(
+		{ input: { command: "git rebase main" } },
 		{
 			cwd: process.cwd(),
 			hasUI: true,
@@ -1875,8 +1888,7 @@ test("permission lifecycle is inactive for unguarded and headless commands", asy
 		registerTool() {},
 	} as unknown as ExtensionAPI;
 	createGentleAiExtension({ processEnv: { GENTLE_PI_AGENTS_CHILD: "0" }, nativeReviewCli: null })(pi);
-	const toolCall = handlers.get("tool_call");
-	assert.equal(typeof toolCall, "function");
+	const toolCall = confirmationPolicy(pi);
 	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-permission-headless-"));
 	try {
 		const confirm = async () => {
@@ -1917,7 +1929,7 @@ test("registered Gentle Review capture tools name the lens they run", () => {
 	assert.equal(cardTitle(renderComponent(group)), "🌹 rdd running · capture group · risk · resilience · readability · reliability");
 });
 
-test("bash tool_call confirms a late guarded npm publish and denies on non-approval", async () => {
+test("confirmation policy labels a late guarded npm publish and denies on non-approval", async () => {
 	type ToolCallHandler = (
 		event: { toolName: string; input: unknown },
 		ctx: ExtensionContext,
@@ -1934,8 +1946,7 @@ test("bash tool_call confirms a late guarded npm publish and denies on non-appro
 		registerTool() {},
 	} as unknown as ExtensionAPI;
 	createGentleAiExtension({ nativeReviewCli: null })(pi);
-	const toolCall = handlers.get("tool_call");
-	assert.equal(typeof toolCall, "function");
+	const toolCall = confirmationPolicy(pi);
 
 	const configHome = mkdtempSync(join(tmpdir(), "gentle-pi-guard-confirm-"));
 	const ctx = {
@@ -1973,7 +1984,7 @@ test("bash tool_call confirms a late guarded npm publish and denies on non-appro
 	assert.ok(preview.startsWith("…"), "preview elides leading context near a late match");
 });
 
-test("bash tool_call confirms every compound action and centers a long git -C push", async () => {
+test("confirmation policy labels every compound action and centers a long git -C push", async () => {
 	type ToolCallHandler = (
 		event: { toolName: string; input: unknown },
 		ctx: ExtensionContext,
@@ -1987,8 +1998,7 @@ test("bash tool_call confirms every compound action and centers a long git -C pu
 		registerTool() {},
 	} as unknown as ExtensionAPI;
 	createGentleAiExtension({ nativeReviewCli: null })(pi);
-	const toolCall = handlers.get("tool_call");
-	assert.equal(typeof toolCall, "function");
+	const toolCall = confirmationPolicy(pi);
 
 	const configHome = mkdtempSync(join(tmpdir(), "gentle-pi-guard-compound-"));
 	const previousConfigHome = process.env.GENTLE_PI_CONFIG_HOME;

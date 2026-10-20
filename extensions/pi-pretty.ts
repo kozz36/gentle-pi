@@ -1,3 +1,4 @@
+import { nativeAdmissionSdk } from "../lib/bash-preexec-admission.ts";
 import {
 	createBashToolDefinition,
 	createFindToolDefinition,
@@ -74,6 +75,40 @@ export default async function gentlePiPrettyExtension(
 	}
 	const extension = bundled ?? await loadPiPrettyExtension();
 	deps = withAgentHome(deps, env);
+	// Provenance is the loaded pinned implementation, not a factory call, name,
+	// schema, or ToolInfo. A supplied extension remains opaque and unsupported.
+	if (bundled === undefined && typeof nativeAdmissionSdk.bindToolExecutionContext === "function") {
+		const supplied = (deps ?? {}) as { sdk?: Record<string, unknown> };
+		const sdk = supplied.sdk ?? nativeAdmissionSdk;
+		const key = sdk.createBashToolDefinition ? "createBashToolDefinition" : "createBashTool";
+		const factory = sdk[key];
+		if (factory === nativeAdmissionSdk.createBashToolDefinition || factory === nativeAdmissionSdk.createBashTool) {
+			let delegate: { execute: object } | undefined;
+			let capturedExecute: object | undefined;
+			const strictFactory = function(this: unknown, cwd: string, options?: Record<string, unknown>) {
+				const tool = Reflect.apply(factory as (...args: unknown[]) => { execute: object }, this, [cwd, { ...options, requireAdmission: true }]);
+				delegate = tool;
+				capturedExecute = tool.execute;
+				return tool;
+			};
+			deps = { ...supplied, sdk: new Proxy(sdk, { get: (target, property, receiver) => property === key ? strictFactory : Reflect.get(target, property, receiver) }) };
+			const api = pi as ExtensionAPI;
+			pi = new Proxy(api, { get(target, property, receiver) {
+				if (property !== "registerTool") return Reflect.get(target, property, receiver);
+				return (tool: Parameters<ExtensionAPI["registerTool"]>[0]) => {
+					// The pinned entry constructs and registers exactly one Bash forwarder.
+					if (tool.name === "bash" && delegate && capturedExecute) {
+						const exactDelegate = delegate;
+						const exactExecute = capturedExecute;
+						const wrapper = tool.execute;
+						nativeAdmissionSdk.bindToolExecutionContext!(wrapper, exactExecute, () => exactDelegate.execute === exactExecute && tool.execute === wrapper);
+						delegate = undefined;
+					}
+					return api.registerTool.call(api, tool);
+				};
+			} });
+		}
+	}
 	if (!shellEnabled(env)) return extension(pi, deps);
 	const api = pi as ExtensionAPI;
 	// Scope interception to this bundled dependency, never to the shared host UI.

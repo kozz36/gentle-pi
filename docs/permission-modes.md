@@ -2,6 +2,18 @@
 
 Use **Normal**, **Auto**, or **YOLO** for the current primary session. Optionally save any of them as the user-global default for future sessions. These modes do not redesign Gentle Shell delegation, expand the task you authorized, or replace independent safety and consent.
 
+## Restricted final Bash admission (isolated development)
+
+This development integration requires the patched SDK's native final local-Bash gate. It is not activated in the installed runtime.
+
+- Canonical SDK Bash definitions using the standard local backend support guarded native admission, including the original default quiet-profile owner. `requireAdmission: true` additionally rejects direct calls without an execution context; it is not required for dispatcher eligibility. The pinned pi-pretty adapter keeps this strict option without replacing the executor's configuration, renderers or metrics.
+- Policy runs on the final command after prefix, spawn-hook, shell and timeout preparation, including initially safe commands. Configuration remains owned by the calling session's cwd, not the transformed target cwd.
+- Confirmation displays the complete command, target cwd, effective timeout, shell, argv and command transport. It does not display environment values. Approval applies only to that invocation; configuration, mode, session or executor changes invalidate pending work.
+- Configured blocks, hard denials and child-safety denials remain non-appealable. Headless confirmation, cancellation, UI errors and nonaffirmative answers do not authorize a process.
+- Old runtimes, unknown executors, opaque supplied pretty functions/factories and custom backends fail closed. Lost execution context or replacement during pending admission cannot authorize a process. The adapter does not replace supplied executors with defaults or provide an early-preview fallback. Other tools retain their existing permission behavior.
+
+These are integration boundaries, not an OS sandbox or a claim that an active installation has been verified. Cross-session/concurrent integration verification and delivery remain separate work.
+
 ## Tool context in Auto
 
 For each pending tool, Auto can include the effective registry's name, description and argument schema as **untrusted descriptive evidence**. The same mechanism applies to ordinary tools and plugins; no tool name or description grants permission. These definitions are not added to the reviewer's callable tools, and embedded instructions cannot replace the live user request or restrictions.
