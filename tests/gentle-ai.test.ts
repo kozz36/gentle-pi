@@ -1333,7 +1333,62 @@ test("model panel render uses the Pi-provided current theme when supplied", () =
 	assert.match(stripAnsi(rendered), /Assign Models and Effort to Agents/);
 });
 
-test("delivery commands fail closed without native admission regardless of RDD mode", async () => {
+test("delivery commands fail closed without native admission regardless of RDD mode", async (t) => {
+	const sdk = await import("@earendil-works/pi-coding-agent") as typeof import("@earendil-works/pi-coding-agent") & {
+		readonly bindToolExecutionContext?: unknown;
+	};
+	const childFlag = "GENTLE_TEST_NATIVE_ADMISSION_ABSENT";
+	if (process.env[childFlag] === "1") assert.equal(sdk.bindToolExecutionContext, undefined);
+	if (typeof sdk.bindToolExecutionContext === "function") {
+		// A fresh graph removes only this capability, retaining the real SDK identities.
+		// Register after inherited profile hooks so the negative facade wins in this child only.
+		const { fileURLToPath } = await import("node:url");
+		const realSdk = import.meta.resolve("@earendil-works/pi-coding-agent");
+		const facade = `data:text/javascript,${encodeURIComponent(
+			`export * from ${JSON.stringify(realSdk)}; export const bindToolExecutionContext = undefined;`,
+		)}`;
+		const hook = `data:text/javascript,${encodeURIComponent(`
+			import { registerHooks } from 'node:module';
+			registerHooks({ resolve(specifier, context, nextResolve) {
+				if (specifier === '@earendil-works/pi-coding-agent')
+					return { url: ${JSON.stringify(facade)}, shortCircuit: true };
+				return nextResolve(specifier, context);
+			} });
+		`)}`;
+		const artifactRoot = process.env.GENTLE_PREEXEC_TEST_ARTIFACT_ROOT ?? tmpdir();
+		const evidence = mkdtempSync(join(artifactRoot, "gentle-native-absent-"));
+		const { spawnSync } = await import("node:child_process");
+		const child = spawnSync(process.execPath, [
+			...process.execArgv.filter((arg) => !arg.startsWith("--test")),
+			"--import", hook, "--test", "--test-reporter=tap",
+			"--test-name-pattern=^delivery commands fail closed without native admission regardless of RDD mode$",
+			fileURLToPath(import.meta.url),
+		], { env: { ...process.env, [childFlag]: "1", NODE_TEST_CONTEXT: undefined }, encoding: "utf8" });
+		writeFileSync(join(evidence, "stdout.log"), child.stdout ?? "", { mode: 0o600 });
+		writeFileSync(join(evidence, "stderr.log"), child.stderr ?? "", { mode: 0o600 });
+		assert.ifError(child.error);
+		assert.equal(child.signal, null, evidence);
+		assert.equal(child.status, 0, `${evidence}\n${child.stdout}\n${child.stderr}`);
+		assert.equal(child.stderr, "", evidence);
+		assert.match(child.stdout, /# pass 1\b/);
+		assert.match(child.stdout, /# fail 0\b/);
+		assert.match(child.stdout, /# cancelled 0\b/);
+		assert.match(child.stdout, /ok \d+ - delivery commands fail closed without native admission regardless of RDD mode/);
+		return;
+	}
+	assert.equal(sdk.bindToolExecutionContext, undefined);
+	const { default: processes } = await import("node:child_process");
+	const { syncBuiltinESMExports } = await import("node:module");
+	let osAttempts = 0;
+	let executorAttempts = 0;
+	for (const name of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"] as const) {
+		t.mock.method(processes, name, () => {
+			osAttempts++;
+			throw new Error(`Unexpected OS execution: ${name}`);
+		});
+	}
+	syncBuiltinESMExports();
+	try {
 	type ToolCallHandler = (
 		event: { toolName: string; input: unknown },
 		ctx: ExtensionContext,
@@ -1358,6 +1413,10 @@ test("delivery commands fail closed without native admission regardless of RDD m
 	for (const mode of modes) {
 		const handlers = new Map<string, ToolCallHandler>();
 		const pi = {
+			exec() {
+				executorAttempts++;
+				throw new Error("Unexpected extension executor invocation");
+			},
 			on(name: string, handler: ToolCallHandler) {
 				handlers.set(name, handler);
 			},
@@ -1381,6 +1440,12 @@ test("delivery commands fail closed without native admission regardless of RDD m
 				reason: "Gentle AI requires native final Bash admission support. This action was not run.",
 			}, `${mode.label}: ${command}`);
 		}
+	}
+	assert.equal(executorAttempts, 0, "unsupported SDK must not invoke the extension executor");
+	assert.equal(osAttempts, 0, "unsupported SDK must not attempt any OS execution");
+	} finally {
+		t.mock.restoreAll();
+		syncBuiltinESMExports();
 	}
 });
 

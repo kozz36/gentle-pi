@@ -40,9 +40,13 @@ import { claimNotificationOwner } from "../lib/notification-service.ts";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "../lib/notification-policy.ts";
 
 
-// Vim fixtures claim the installed pi-tui release, which the adapter gate
-// verifies against imported metadata; the open devDependency range is policy.
-const INSTALLED_PI = (createRequire(import.meta.url)("@earendil-works/pi-tui/package.json") as { version: string }).version;
+// Resolve metadata beside the actual imported TUI entry, including SDK aliases.
+// Extension-relative require can select a different installed release instead.
+const importedTuiEntry = import.meta.resolve("@earendil-works/pi-tui");
+const importedTuiPackage = createRequire(importedTuiEntry)("../package.json") as { name: string; version: string };
+assert.equal(importedTuiPackage.name, "@earendil-works/pi-tui");
+assert.equal(typeof importedTuiPackage.version, "string");
+const INSTALLED_PI = importedTuiPackage.version;
 
 // The Gentle Shell extension wires the pure bar renderer into pi's footer
 // slot. These tests drive it with a fake ExtensionAPI and context.
