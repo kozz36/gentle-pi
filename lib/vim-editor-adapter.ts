@@ -1,5 +1,7 @@
 import { CURSOR_MARKER, Editor, visibleWidth } from "@earendil-works/pi-tui";
-import { createRequire } from "node:module";
+import { readFileSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Private shape audited against @earendil-works/pi-tui 0.99.1, 0.99.2, 1.0.0, 1.1.0 and 1.2.0:
 // editor.js state/pastes/history, sticky cursor reset, layoutText/render geometry,
@@ -17,6 +19,11 @@ import { createRequire } from "node:module";
 // markers resolved by the host TUI (including hardware-cursor suppression).
 // Keep these markers intact and rearm selection after their reverse-off;
 // state, undo, paste, layout and autocomplete contracts remain unchanged.
+// Actual 1.3.0 source contract audit also found consistent state/cursor resets,
+// paste registry/counter, history draft/exit, layout/render geometry and paired
+// APC markers, host autocomplete cancellation, and cloned undo restoration.
+// This is touched-contract consistency, not byte identity or functional approval:
+// real matching bundled/unbundled 1.3.0 tests are still required.
 // Never silently adapt another build: undo also owns the paste registry.
 interface Position { line: number; col: number }
 interface State { lines: string[]; cursorLine: number; cursorCol: number }
@@ -55,17 +62,35 @@ interface PrivateEditor {
 
 // The single audited-release source for the adapter and Gentle Shell's runtime
 // identity gates. Add a release only after re-auditing the files named above.
-export const AUDITED_PI_EDITOR_VERSIONS = Object.freeze(["0.99.1", "0.99.2", "1.0.0", "1.1.0", "1.2.0"] as const);
+export const AUDITED_PI_EDITOR_VERSIONS = Object.freeze(["0.99.1", "0.99.2", "1.0.0", "1.1.0", "1.2.0", "1.3.0"] as const);
 export type AuditedPiEditorVersion = (typeof AUDITED_PI_EDITOR_VERSIONS)[number];
 
 export function isAuditedPiEditorVersion(version: unknown): version is AuditedPiEditorVersion {
   return typeof version === "string" && (AUDITED_PI_EDITOR_VERSIONS as readonly string[]).includes(version);
 }
-// Pi aliases only ES imports of host packages. This raw require walks
-// node_modules from the extension, which a git install lacks (#1586), so an
-// unresolved host leaves the version unknown and the identity gate closed.
+// Resolve the same ESM entry as the imported Editor, not extension-relative
+// node_modules (which can be a different release). Virtual/unknown hosts stay
+// closed here; the caller-verified bundled identity path remains separate.
 const importedTuiMetadata: unknown = (() => {
-  try { return createRequire(import.meta.url)("@earendil-works/pi-tui/package.json"); } catch { return undefined; }
+  try {
+    const entry = new URL(import.meta.resolve("@earendil-works/pi-tui"));
+    if (entry.protocol !== "file:") return undefined;
+    let directory = dirname(realpathSync(fileURLToPath(entry)));
+    while (true) {
+      let source: string;
+      try { source = readFileSync(join(directory, "package.json"), "utf8"); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+        const parent = dirname(directory);
+        if (parent === directory) return undefined;
+        directory = parent;
+        continue;
+      }
+      const metadata = JSON.parse(source) as { name?: unknown; version?: unknown };
+      return metadata.name === "@earendil-works/pi-tui" && isAuditedPiEditorVersion(metadata.version)
+        ? metadata : undefined;
+    }
+  } catch { return undefined; }
 })();
 const IMPORTED_TUI_VERSION = typeof importedTuiMetadata === "object" && importedTuiMetadata !== null &&
   "version" in importedTuiMetadata ? importedTuiMetadata.version : undefined;

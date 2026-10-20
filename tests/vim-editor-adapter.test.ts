@@ -48,13 +48,31 @@ function selectedColumns(row: string): number[] {
   return paintedCells(row).flatMap((cell, col) => cell.inverse ? [col] : []);
 }
 
-// Exercise both module graphs from the exact declared development install.
-// No user PATH shim or optional global install is needed for bundled identity.
-const target = fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js", import.meta.url));
+// Exercise both real graphs from the selected SDK, or the existing development
+// install by default. The parent rebuilds the SDK bundle before paired tests.
+const sdkRoot = process.env.GENTLE_PREEXEC_SDK_ROOT;
+const target = sdkRoot
+  ? resolve(realpathSync(sdkRoot), "packages/coding-agent/dist/bundle/cli.js")
+  : fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js", import.meta.url));
 const skip0871 = undefined;
-// Development resolves Pi through an open devDependency range, so the version
-// under test is the installed TUI metadata, never the manifest specifier.
-const INSTALLED_PI = (createRequire(import.meta.url)("@earendil-works/pi-tui/package.json") as { version: string }).version;
+
+function actualPackage(entry: string, name: string): { version: string } {
+  let directory = dirname(realpathSync(entry));
+  while (!existsSync(resolve(directory, "package.json"))) {
+    const parent = dirname(directory);
+    assert.notEqual(parent, directory, `package metadata missing for ${entry}`);
+    directory = parent;
+  }
+  const metadata = JSON.parse(readFileSync(resolve(directory, "package.json"), "utf8"));
+  assert.equal(metadata.name, name, "the actual entry must belong to the expected package");
+  assert.equal(typeof metadata.version, "string");
+  return metadata;
+}
+
+// ESM aliases may select a different TUI than extension-relative require.
+// Virtual entries cannot supply physical identity metadata here.
+const importedTuiEntry = realpathSync(fileURLToPath(import.meta.resolve("@earendil-works/pi-tui")));
+const INSTALLED_PI = actualPackage(importedTuiEntry, "@earendil-works/pi-tui").version;
 
 let runtimeTui: typeof import("@earendil-works/pi-tui") | undefined;
 let runtimeAgent: typeof import("@earendil-works/pi-coding-agent") | undefined;
@@ -67,10 +85,11 @@ let virtualTui: { CustomEditor?: typeof import("@earendil-works/pi-coding-agent"
 
 if (target) {
   const runtimeRequire = createRequire(realpathSync(target));
-  const runtimeTuiPath = runtimeRequire.resolve("@earendil-works/pi-tui");
+  const runtimeTuiPath = realpathSync(runtimeRequire.resolve("@earendil-works/pi-tui"));
   const runtimeAgentPath = resolve(dirname(realpathSync(target)), "../index.js");
-  runtimeTuiPackage = runtimeRequire(resolve(dirname(runtimeTuiPath), "../package.json")) as { version: string };
-  runtimeAgentPackage = runtimeRequire(resolve(dirname(runtimeAgentPath), "../package.json")) as { version: string };
+  assert.equal(runtimeTuiPath, importedTuiEntry, "selected CLI and ESM aliases must use the same actual TUI entry");
+  runtimeTuiPackage = actualPackage(runtimeTuiPath, "@earendil-works/pi-tui");
+  runtimeAgentPackage = actualPackage(runtimeAgentPath, "@earendil-works/pi-coding-agent");
   runtimeTui = await import(pathToFileURL(runtimeTuiPath).href) as typeof import("@earendil-works/pi-tui");
   runtimeAgent = await import(pathToFileURL(runtimeAgentPath).href) as typeof import("@earendil-works/pi-coding-agent");
   // The PATH CLI runs the bundled graph, not the package's unbundled dist/index.js.
@@ -277,12 +296,12 @@ test("resolveVimRuntime resolves local bundle cli entrypoint when provided", () 
 });
 
 test("audited Pi editor releases are one frozen exact allowlist that includes the installed TUI", () => {
-  assert.deepEqual([...AUDITED_PI_EDITOR_VERSIONS], ["0.99.1", "0.99.2", "1.0.0", "1.1.0", "1.2.0"]);
+  assert.deepEqual([...AUDITED_PI_EDITOR_VERSIONS], ["0.99.1", "0.99.2", "1.0.0", "1.1.0", "1.2.0", "1.3.0"]);
   assert.equal(bundledAgent.VERSION, INSTALLED_PI, "bundled and local metadata must describe the same actual installed release");
   assert.ok(Object.isFrozen(AUDITED_PI_EDITOR_VERSIONS));
   assert.throws(() => (AUDITED_PI_EDITOR_VERSIONS as unknown as string[]).push("0.99.3"), TypeError);
   assert.ok(isAuditedPiEditorVersion(INSTALLED_PI), `installed pi-tui ${INSTALLED_PI} must be audited`);
-  for (const unknown of ["0.99.3", "0.99.10", "0.99", "v0.99.2", " 0.99.2", "0.99.2-rc.1", ">=0.99.2", "1.0.1", ">=1.0.0", "v1.0.0", " 1.0.0", "1.0.0-rc.1", "1.2.1", "1.2.0-rc.1", "v1.2.0", ">=1.2.0", undefined, 99.2]) {
+  for (const unknown of ["0.99.3", "0.99.10", "0.99", "v0.99.2", " 0.99.2", "0.99.2-rc.1", ">=0.99.2", "1.0.1", ">=1.0.0", "v1.0.0", " 1.0.0", "1.0.0-rc.1", "1.2.1", "1.2.0-rc.1", "v1.2.0", ">=1.2.0", "1.3.1", "1.3.0-rc.1", "v1.3.0", ">=1.3.0", undefined, 99.2]) {
     assert.equal(isAuditedPiEditorVersion(unknown), false, String(unknown));
   }
 });
