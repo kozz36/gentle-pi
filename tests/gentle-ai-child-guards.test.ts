@@ -1,11 +1,13 @@
+import { createNativeSession, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import { bindSessionRepositoryPreparation } from "../lib/bounded-writer-admission.ts";
 import { GENTLE_AI_TIMING_ENTRY } from "../lib/gentle-ai-elapsed-store.ts";
 import { REVIEW_SIDEBAR_EVENT } from "../lib/review-sidebar-state.ts";
@@ -255,9 +257,45 @@ test("parent tool_result still prepares the bound repository", async (t) => {
 
 test("child confirm-class guardrail commands ask the parent instead of running or blocking headlessly", async (t) => {
 	const { cwd } = isolate(t);
-	const h = harness(true, cwd);
-	const result = await h.handlers.get("tool_call")!({ toolName: "bash", input: { command: "pi remove some-package" } }, h.ctx) as { block?: boolean; reason?: string } | undefined;
-	assert.equal(h.prompts.length, 1, JSON.stringify(h.prompts));
-	assert.equal(result?.block, true, "the declined confirmation blocks the command");
-	assert.doesNotMatch(result?.reason ?? "", /requires interactive confirmation/);
+	const command = "pi remove some-package", sentinel = join(cwd, "owned-counter");
+	writeFileSync(sentinel, "unchanged");
+	for (const child of [true, false]) {
+		const requests: Array<{ title: string; message: string }> = [], contexts: unknown[] = [], outcomes: any[] = [];
+		let callbacks = 0;
+		const native = await createNativeSession({ cwd, extensionFactories: [pi => {
+			createGentleAiExtension({
+				processEnv: { GENTLE_PI_AGENTS_CHILD: child ? "1" : "0", GENTLE_AI_TELEMETRY: "0" },
+				nativeReviewCli: null, candidateViews: null,
+				childStandingReviewPermissionClient: { requestAuthorization: async () => false, close() {} },
+			})(pi);
+			pi.on("tool_call", (_event, ctx) => { contexts.push({ mode: ctx.mode, hasUI: ctx.hasUI, cwd: ctx.cwd }); });
+		}] });
+		t.after(() => native.session.dispose());
+		// The real RPC bridge owns this parent-facing presentation; no tool context is forged.
+		await native.session.bindExtensions({ mode: "rpc", uiContext: {
+			notify() {}, setStatus() {}, setWidget() {},
+			confirm: async (title: string, message: string) => { requests.push({ title, message }); return false; },
+		} });
+		const unsubscribe = native.session.subscribe((event: any) => {
+			if (event.type === "tool_execution_update" && event.partialResult.content.length === 0) callbacks++;
+			if (event.type === "tool_execution_end") outcomes.push(event);
+		});
+		const originalSpawn = childProcess.spawn, attempts: Parameters<typeof originalSpawn>[] = [];
+		class FixtureStop extends Error {}
+		const stopped = new FixtureStop("FixtureStop: child-parent fixture categorically stopped OS process creation");
+		childProcess.spawn = ((...args: Parameters<typeof originalSpawn>) => { attempts.push(args); throw stopped; }) as unknown as typeof originalSpawn;
+		syncBuiltinESMExports();
+		native.faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command })], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+		try { await native.session.agent.prompt({ role: "user", content: "Check only the owned parent-permission fixture.", timestamp: 1 }); }
+		finally { unsubscribe(); childProcess.spawn = originalSpawn; syncBuiltinESMExports(); }
+		assert.deepEqual(contexts, [{ mode: "rpc", hasUI: true, cwd }]);
+		assert.equal(requests.length, 1, `${child ? "child" : "parent"}: one parent-facing request`);
+		assert.ok(requests[0].message.includes(command)); assert.ok(requests[0].message.includes(cwd));
+		assert.equal(callbacks, 1); assert.equal(attempts.length, 0, "parent decline prevents OS process creation");
+		assert.equal(outcomes.length, 1); assert.equal(outcomes[0].isError, true, "the declined confirmation blocks the command");
+		const reason = outcomes[0].result.content.map((block: any) => block.text ?? "").join("\n");
+		assert.equal(reason, "Tool execution admission denied");
+		assert.doesNotMatch(reason, /requires interactive confirmation/);
+		assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+	}
 });
