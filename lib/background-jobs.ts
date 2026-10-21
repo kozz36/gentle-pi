@@ -12,7 +12,9 @@
 // (`createLocalBashOperations`), so the configured shell, the command
 // transport, process groups, and process-tree kill match native Bash.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createWriteStream, type WriteStream } from "node:fs";
+import { bindToolExecutionContext, createBashToolDefinition, createLocalBashOperations, type BashOperations } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 
 /** The background sibling of Pi's native `bash` tool. */
@@ -119,6 +121,8 @@ export interface JobStartRequest {
 	kind?: JobKind;
 	/** Called with each complete output line, and the last partial one at exit. */
 	onLine?: (line: string) => void;
+	/** Initializes a monitor synchronously before the first output chunk. */
+	onStarted?: (job: JobRecord) => void;
 }
 
 export interface JobRegistryDeps {
@@ -127,6 +131,8 @@ export interface JobRegistryDeps {
 	now(): number;
 	/** Resolved at each start so a changed shell setting applies to the next job. */
 	shell(cwd: string): { operations: JobExecOperations; commandPrefix?: string };
+	/** Native settings only. Custom shell operations never inherit native authority. */
+	nativeShell?(cwd: string): { shellPath?: string; commandPrefix?: string };
 	/** Called once when a job ends on its own (exited or failed), never for a stop. */
 	onSettled(job: JobRecord): void;
 }
@@ -137,6 +143,40 @@ export function createJobRegistry(deps: JobRegistryDeps) {
 	// Every job's run, until its log file is closed and its exit reported.
 	const runs = new Set<Promise<void>>();
 	let counter = 0;
+	type NativeRun = {
+		settings: { shellPath?: string; commandPrefix?: string };
+		abort: AbortController;
+		completion: Promise<{ exitCode: number | null }>;
+		onData?: (data: Buffer) => void;
+		onStarted(): void;
+	};
+	const invocation = new AsyncLocalStorage<NativeRun>();
+	const starting = new Map<AbortController, Promise<void>>();
+	// Both bindings name the functions actually called. The async-local store
+	// carries lifecycle callbacks/settings only, never an admission capability.
+	const native = deps.nativeShell ? createLocalBashOperations({
+		get shellPath() { return invocation.getStore()?.settings.shellPath; },
+	}) : undefined;
+	const backend = native?.exec;
+	const operations: BashOperations | undefined = native && backend ? {
+		exec(command, cwd, options) {
+			const run = invocation.getStore();
+			if (!run) throw new Error("Missing background invocation");
+			return Reflect.apply(backend, native, [command, cwd, {
+				...options,
+				onData: (data: Buffer) => { options.onData(data); run.onData?.(data); },
+			}]);
+		},
+	} : undefined;
+	if (operations && backend && native) bindToolExecutionContext(operations.exec, backend, () => native.exec === backend);
+	const nativeTool = operations ? createBashToolDefinition(".", {
+		operations, requireAdmission: true, exposeSessionEnvironment: false,
+		spawnHook: context => {
+			const prefix = invocation.getStore()?.settings.commandPrefix;
+			return { ...context, command: prefix ? `${prefix}\n${context.command}` : context.command };
+		},
+		onStarted: () => invocation.getStore()!.onStarted(),
+	}) : undefined;
 
 	const running = () => [...jobs.values()].filter((job) => job.status === "running").length;
 
@@ -146,11 +186,11 @@ export function createJobRegistry(deps: JobRegistryDeps) {
 		aborts.delete(job.id);
 	};
 
-	const start = (request: JobStartRequest): JobRecord => {
+	const start = (request: JobStartRequest, admitted?: NativeRun): JobRecord => {
 		if (running() >= MAX_RUNNING_JOBS) {
 			throw new Error(`${MAX_RUNNING_JOBS} background jobs are already running; stop one with job_stop first.`);
 		}
-		const { operations, commandPrefix } = deps.shell(request.cwd);
+		const shell = admitted ? undefined : deps.shell(request.cwd);
 		const id = `job-${++counter}`;
 		const job: JobRecord = {
 			id,
@@ -169,10 +209,11 @@ export function createJobRegistry(deps: JobRegistryDeps) {
 		const tail = createOutputTail();
 		// Streaming decode keeps a multibyte character split across chunks intact.
 		const decoder = new TextDecoder("utf-8");
-		const abort = new AbortController();
+		const abort = admitted?.abort ?? new AbortController();
 		jobs.set(id, job);
 		aborts.set(id, abort);
-		const execCommand = commandPrefix ? `${commandPrefix}\n${request.command}` : request.command;
+		request.onStarted?.(job);
+		const execCommand = shell?.commandPrefix ? `${shell.commandPrefix}\n${request.command}` : request.command;
 		let linePartial = "";
 		const emitLines = (text: string, end: boolean) => {
 			if (!request.onLine) return;
@@ -200,7 +241,9 @@ export function createJobRegistry(deps: JobRegistryDeps) {
 			job.tail = tail.lines();
 			emitLines(text, false);
 		};
-		const run = operations.exec(execCommand, request.cwd, { onData, signal: abort.signal }).then(
+		if (admitted) admitted.onData = onData;
+		const execution = admitted?.completion ?? shell!.operations.exec(execCommand, request.cwd, { onData, signal: abort.signal });
+		const run = execution.then(
 			({ exitCode }) => finish(job, output, () => {
 				flushDecoder();
 				if (job.status !== "running") return;
@@ -222,6 +265,47 @@ export function createJobRegistry(deps: JobRegistryDeps) {
 		return job;
 	};
 
+	const startAdmitted = async (request: JobStartRequest, ...args: Parameters<NonNullable<typeof nativeTool>["execute"]>): Promise<JobRecord> => {
+		if (!nativeTool || !deps.nativeShell) throw new Error("Executor does not support final admission");
+		if (running() + starting.size >= MAX_RUNNING_JOBS) throw new Error(`${MAX_RUNNING_JOBS} background jobs are already running; stop one with job_stop first.`);
+		const settings = deps.nativeShell(request.cwd);
+		const abort = new AbortController();
+		const signal = args[2];
+		const cancel = () => abort.abort();
+		if (signal?.aborted) cancel();
+		else signal?.addEventListener("abort", cancel, { once: true });
+		let resolveStart!: (job: JobRecord) => void;
+		let rejectStart!: (error: unknown) => void;
+		const started = new Promise<JobRecord>((resolve, reject) => { resolveStart = resolve; rejectStart = reject; });
+		let resolveExit!: (value: { exitCode: number | null }) => void;
+		let rejectExit!: (error: unknown) => void;
+		const completion = new Promise<{ exitCode: number | null }>((resolve, reject) => { resolveExit = resolve; rejectExit = reject; });
+		// Rejections before publication have no job/log consumer.
+		void completion.catch(() => {});
+		const state: NativeRun = {
+			settings, abort, completion,
+			onStarted() {
+				starting.delete(abort);
+				const job = start(request, state);
+				signal?.removeEventListener("abort", cancel);
+				resolveStart(job);
+			},
+		};
+		// Reserve capacity privately, without assigning an id or publishing a job.
+		const done = invocation.run(state, () => nativeTool.execute(args[0], args[1], abort.signal, args[3], args[4])).then(
+			result => {
+				const output = result.structuredContent;
+				const exitCode = output && typeof output === "object" && "exit_code" in output && typeof output.exit_code === "number"
+					? output.exit_code : null;
+				resolveExit({ exitCode });
+				rejectStart(new Error("Native executor completed without a start acknowledgement"));
+			},
+			error => { rejectExit(error); rejectStart(error); },
+		).finally(() => { starting.delete(abort); signal?.removeEventListener("abort", cancel); });
+		starting.set(abort, done);
+		return started;
+	};
+
 	const stop = (id: string): JobRecord | undefined => {
 		const job = jobs.get(id);
 		if (!job) return undefined;
@@ -235,6 +319,8 @@ export function createJobRegistry(deps: JobRegistryDeps) {
 
 	return {
 		start,
+		startAdmitted,
+		nativeExecutor: nativeTool?.execute,
 		stop,
 		get: (id: string) => jobs.get(id),
 		/** Jobs in start order, optionally only those one session owns. */
@@ -244,7 +330,10 @@ export function createJobRegistry(deps: JobRegistryDeps) {
 		pending: () => runs.size,
 		/** Stops every running job and resolves once every log file is closed. */
 		stopAll: async () => {
+			const pending = [...starting.values()];
+			for (const abort of starting.keys()) abort.abort();
 			for (const id of jobs.keys()) stop(id);
+			await Promise.allSettled(pending);
 			await Promise.allSettled([...runs]);
 		},
 	};

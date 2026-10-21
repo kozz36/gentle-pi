@@ -114,30 +114,36 @@ export function createMonitorController(deps: MonitorControllerDeps) {
 		deps.deliver({ job, kind: "stopped", reason });
 	};
 
+	const prepare = (request: MonitorStartRequest): JobStartRequest => {
+		const { timeoutSeconds, ...rest } = request;
+		if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > MONITOR_MAX_TIMEOUT_SECONDS) {
+			throw new Error(`timeout_seconds must be a whole number from 1 to ${MONITOR_MAX_TIMEOUT_SECONDS}.`);
+		}
+		const batcher = createEventBatcher();
+		let job: JobRecord | undefined;
+		const onLine = (line: string) => {
+			const state = job && active.get(job.id);
+			// A stopped or finished monitor reports nothing more.
+			if (!job || !state || job.status !== "running") return;
+			const { opensBatch, flood } = batcher.pushLine(line, deps.now());
+			job.events = batcher.total();
+			if (flood) return stopFor(job, "flood");
+			if (opensBatch) state.cancelFlush = deps.schedule(() => job && flush(job), MONITOR_BATCH_MS);
+		};
+		return {
+			...rest, kind: "monitor", onLine,
+			onStarted(started) {
+				job = started;
+				job.events = 0;
+				job.timeoutSeconds = timeoutSeconds;
+				active.set(started.id, { batcher, cancelTimeout: deps.schedule(() => stopFor(started, "timeout"), timeoutSeconds * 1000) });
+				rest.onStarted?.(started);
+			},
+		};
+	};
 	return {
-		start(request: MonitorStartRequest): JobRecord {
-			const { timeoutSeconds, ...rest } = request;
-			if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > MONITOR_MAX_TIMEOUT_SECONDS) {
-				throw new Error(`timeout_seconds must be a whole number from 1 to ${MONITOR_MAX_TIMEOUT_SECONDS}.`);
-			}
-			const batcher = createEventBatcher();
-			let job: JobRecord | undefined;
-			const onLine = (line: string) => {
-				const state = job && active.get(job.id);
-				// A stopped or finished monitor reports nothing more.
-				if (!job || !state || job.status !== "running") return;
-				const { opensBatch, flood } = batcher.pushLine(line, deps.now());
-				job.events = batcher.total();
-				if (flood) return stopFor(job, "flood");
-				if (opensBatch) state.cancelFlush = deps.schedule(() => job && flush(job), MONITOR_BATCH_MS);
-			};
-			job = deps.registry.start({ ...rest, kind: "monitor", onLine });
-			job.events = 0;
-			job.timeoutSeconds = timeoutSeconds;
-			const started = job;
-			active.set(started.id, { batcher, cancelTimeout: deps.schedule(() => stopFor(started, "timeout"), timeoutSeconds * 1000) });
-			return started;
-		},
+		start: (request: MonitorStartRequest) => deps.registry.start(prepare(request)),
+		startAdmitted: (request: MonitorStartRequest, ...args: Parameters<NonNullable<JobRegistry["nativeExecutor"]>>) => deps.registry.startAdmitted(prepare(request), ...args),
 		/** The job ended on its own: deliver its pending lines before the exit notice. */
 		finish(job: JobRecord) {
 			flush(job);

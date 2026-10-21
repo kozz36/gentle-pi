@@ -23,6 +23,7 @@ auth.json
 .gentle-ai/
 .npm/
 coverage/
+/.verification/
 
 # Local subagent scratch/output artifacts
 context.md

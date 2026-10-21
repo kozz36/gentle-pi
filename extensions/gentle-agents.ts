@@ -819,6 +819,10 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	const jobs = createJobRegistry({
 		outputDir: deps.jobOutputDir ?? (() => (jobOutputDir ??= mkdtempSync(join(os.tmpdir(), "gentle-jobs-")))),
 		now: deps.now,
+		nativeShell: deps.jobShell ? undefined : (cwd) => {
+			const settings = SettingsManager.create(cwd, agentHome);
+			return { shellPath: settings.getShellPath(), commandPrefix: settings.getShellCommandPrefix() };
+		},
 		shell: deps.jobShell ?? ((cwd) => {
 			const settings = SettingsManager.create(cwd, agentHome);
 			return { operations: createLocalBashOperations({ shellPath: settings.getShellPath() }), commandPrefix: settings.getShellCommandPrefix() };

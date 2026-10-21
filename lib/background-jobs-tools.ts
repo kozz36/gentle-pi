@@ -3,7 +3,7 @@
 // Delivery of the notice belongs to the caller (Gentle Agents' parent
 // delivery router), so this module never sends messages itself.
 
-import { keyHint, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { bindToolExecutionContext, keyHint, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BASH_BACKGROUND_TOOL, MAX_RUNNING_JOBS, MONITOR_TOOL, type JobRecord, type JobRegistry } from "./background-jobs.ts";
 import { MONITOR_BATCH_MS, MONITOR_FLOOD_LINES, MONITOR_FLOOD_WINDOW_MS, MONITOR_LINES_PER_NOTICE, MONITOR_MAX_TIMEOUT_SECONDS, type MonitorBatch, type MonitorController, type MonitorStopReason } from "./background-monitor.ts";
 import { CARD_TONE, renderCard, type CardTheme } from "./shell-card.ts";
@@ -91,7 +91,17 @@ export function registerBackgroundJobTools(pi: ExtensionAPI, options: Background
 		return job && job.ownerSessionId === options.sessionId(ctx) ? job : undefined;
 	};
 
-	pi.registerTool({
+	const delegate = registry.nativeExecutor;
+	const startAdmitted = registry.startAdmitted;
+	const startMonitor = options.monitors?.startAdmitted;
+	const registerShellTool = (tool: Parameters<ExtensionAPI["registerTool"]>[0]) => {
+		if (delegate) bindToolExecutionContext(tool.execute, delegate, () => registry.nativeExecutor === delegate
+			&& registry.startAdmitted === startAdmitted
+			&& (tool.name !== MONITOR_TOOL || options.monitors?.startAdmitted === startMonitor));
+		pi.registerTool(tool);
+	};
+
+	registerShellTool({
 		name: BASH_BACKGROUND_TOOL,
 		label: "Bash (background)",
 		description: [
@@ -112,7 +122,10 @@ export function registerBackgroundJobTools(pi: ExtensionAPI, options: Background
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const input = params as { command?: unknown; label?: unknown };
 			if (typeof input.command !== "string" || !input.command.trim()) throw new Error("bash_background requires a non-empty command");
-			const job = registry.start({ command: input.command, cwd: ctx.cwd, ownerSessionId: options.sessionId(ctx), label: typeof input.label === "string" ? input.label : undefined });
+			const request = { command: input.command, cwd: ctx.cwd, ownerSessionId: options.sessionId(ctx), label: typeof input.label === "string" ? input.label : undefined };
+			const job = delegate
+				? await startAdmitted(request, _id, { command: input.command }, _signal, undefined, ctx)
+				: registry.start(request);
 			options.onChange?.();
 			return text(
 				`Started background job ${quoted(job)}.\nOutput: ${job.outputPath}\nYou will be notified once when it exits; keep working or end your turn. Stop it with job_stop.`,
@@ -122,7 +135,7 @@ export function registerBackgroundJobTools(pi: ExtensionAPI, options: Background
 	});
 
 	const monitors = options.monitors;
-	if (monitors) pi.registerTool({
+	if (monitors) registerShellTool({
 		name: MONITOR_TOOL,
 		label: "Monitor",
 		description: [
@@ -145,7 +158,10 @@ export function registerBackgroundJobTools(pi: ExtensionAPI, options: Background
 			const input = params as { command?: unknown; label?: unknown; timeout_seconds?: unknown };
 			if (typeof input.command !== "string" || !input.command.trim()) throw new Error("monitor requires a non-empty command");
 			const timeoutSeconds = typeof input.timeout_seconds === "number" ? input.timeout_seconds : Number.NaN;
-			const job = monitors.start({ command: input.command, cwd: ctx.cwd, ownerSessionId: options.sessionId(ctx), label: typeof input.label === "string" ? input.label : undefined, timeoutSeconds });
+			const request = { command: input.command, cwd: ctx.cwd, ownerSessionId: options.sessionId(ctx), label: typeof input.label === "string" ? input.label : undefined, timeoutSeconds };
+			const job = delegate
+				? await startMonitor!(request, _id, { command: input.command }, _signal, undefined, ctx)
+				: monitors.start(request);
 			options.onChange?.();
 			return text(
 				`Started monitor ${quoted(job)} for up to ${timeoutSeconds}s.\nOutput: ${job.outputPath}\nEach new output line reaches you as an event; keep working or end your turn. Stop it with job_stop.`,
