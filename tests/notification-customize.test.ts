@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { CARD_PADDING } from "../lib/command-palette.ts";
 import { buildNotificationRows } from "../lib/notification-customize.ts";
 import { claimNotificationOwner, getNotificationService } from "../lib/notification-service.ts";
 import { DEFAULT_NOTIFICATION_SETTINGS, type NotificationEvent, type NotificationSettings, type NotificationSound } from "../lib/notification-policy.ts";
@@ -12,6 +14,12 @@ const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /** Real packaged WAVs so a valid path uses an existing fixture, never a synthetic name. */
 const WAV_FIXTURE = fileURLToPath(new URL("../assets/sounds/success.wav", import.meta.url));
+/** Validation scenarios require a fully visible field, even in a deeply nested checkout. */
+function renderVisibleSoundField(view: VisualCustomizeView): void {
+	const field = `Local audio path (WAV/OGG/FLAC, absolute, no URLs): ${WAV_FIXTURE}▏`;
+	const width = Math.max(160, visibleWidth(field) + CARD_PADDING);
+	assert.ok(view.render(width).some(line => line.includes(field)), "the complete local sound field must be visible before submission");
+}
 const WAV_FIXTURES = {
 	success: fileURLToPath(new URL("../assets/sounds/success.wav", import.meta.url)),
 	error: fileURLToPath(new URL("../assets/sounds/error.wav", import.meta.url)),
@@ -222,6 +230,14 @@ test("an in-flight local sound validation keeps busy, blocking a second field an
 		view.handleInput("f");
 		assert.match(view.render(160).join("\n"), /Local audio path/);
 		view.handleInput(WAV_FIXTURE);
+		const before = structuredClone(getNotificationService()!.getState().settings);
+		view.render(40);
+		view.handleInput("\r");
+		await tick();
+		assert.deepEqual(validated, [], "a clipped local sound field must not start validation");
+		assert.equal(h.writes, 0, "an unseen choice never writes");
+		assert.deepEqual(getNotificationService()!.getState().settings, before, "an unseen choice leaves settings unchanged");
+		renderVisibleSoundField(view);
 		view.handleInput("\r");
 		await tick();
 		assert.deepEqual(validated, [`file:${WAV_FIXTURE}`], "the submitted value is validated exactly once");
@@ -231,6 +247,7 @@ test("an in-flight local sound validation keeps busy, blocking a second field an
 		await tick();
 		assert.doesNotMatch(view.render(160).join("\n"), /Local audio path/, "a second f cannot open another field while busy");
 		assert.equal(h.writes, 0, "no write before the deferred validation resolves");
+		assert.deepEqual(getNotificationService()!.getState().settings, before, "pending validation leaves settings unchanged");
 		// Resolve: a single write, then busy releases for the next edit.
 		resolveValidation(true);
 		await tick(); await tick();
@@ -268,12 +285,16 @@ test("disposing the card while validation is in flight never writes the stale ch
 		view.handleInput("f");
 		view.render(160);
 		view.handleInput(WAV_FIXTURE);
+		renderVisibleSoundField(view);
 		view.handleInput("\r");
 		await tick();
+		assert.equal(typeof resolveValidation, "function", "validation must be in flight before disposing the card");
+		const before = structuredClone(getNotificationService()!.getState().settings);
 		view.dispose();
 		resolveValidation(true);
 		await tick(); await tick();
 		assert.equal(h.writes, 0, "a disposed card must not persist the validated choice");
+		assert.deepEqual(getNotificationService()!.getState().settings, before, "a disposed card leaves settings unchanged");
 	} finally { h.owner.retire(); }
 });
 
