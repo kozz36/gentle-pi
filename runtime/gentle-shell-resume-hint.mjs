@@ -15,7 +15,8 @@ import { shellQuote } from "./gentle-shell-launcher.mjs";
 
 export const RESUME_HANDOFF_ENV = "GENTLE_SHELL_RESUME_HANDOFF";
 
-const HINT_LABEL = "To resume in gentle-shell:";
+// An identity is a single PATH command, never a path or shell expression.
+const COMMAND_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
 
 // pi's assertValidSessionId charset. The handoff ends up on the terminal, so
 // anything outside it (or any C0/C1 control in a session dir) is refused
@@ -134,7 +135,9 @@ export function gentleShellResumeCommand(
 	handoff               ,
 	homeFlags          ,
 	platform                 ,
+	commandName = "gentle-shell",
 )                     {
+	if (!COMMAND_NAME.test(commandName)) return undefined;
 	const values = [...homeFlags];
 	// pi treats a --session value containing a path separator as a file path
 	// and opens it directly, whatever the launch directory.
@@ -144,7 +147,7 @@ export function gentleShellResumeCommand(
 		if (handoff.sessionDir !== undefined) values.push("--session-dir", handoff.sessionDir);
 		values.push("--session", handoff.sessionId);
 	}
-	const args = ["gentle-shell"];
+	const args = [commandName];
 	for (const value of values) {
 		const quoted = quoteArg(value, platform);
 		if (quoted === undefined) return undefined;
@@ -165,13 +168,17 @@ export function gentleShellResumeCommand(
 
 
 
+
+
 // Returns the line to print after pi exits, or undefined to print nothing.
 // Like pi, it only prints to a TTY, and never after the terminal hung up.
 export function planResumeHint(input                 )                     {
 	const { handoff, homeFlags, stdoutIsTTY, terminalHungUp, platform, color } = input;
 	if (!handoff || !stdoutIsTTY || terminalHungUp) return undefined;
-	const command = gentleShellResumeCommand(handoff, homeFlags, platform);
+	const commandName = input.commandName ?? "gentle-shell";
+	const command = gentleShellResumeCommand(handoff, homeFlags, platform, commandName);
 	if (command === undefined) return undefined;
-	const label = color ? `\u001b[2m${HINT_LABEL}\u001b[22m` : HINT_LABEL;
+	const hintLabel = `To resume in ${commandName}:`;
+	const label = color ? `\u001b[2m${hintLabel}\u001b[22m` : hintLabel;
 	return `${label} ${command}\n`;
 }

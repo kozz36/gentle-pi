@@ -21,6 +21,27 @@ const AGENT_DIR = resolve("/home/u/.gentle-shell/agent");
 const CWD = resolve("/home/u/project");
 const DEFAULT_DIR = join(AGENT_DIR, "sessions", `--${CWD.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
 
+test("resume identity defaults exactly and accepts only safe plain PATH names in source and runtime", async () => {
+	const runtime = await import("../runtime/gentle-shell-resume-hint.mjs");
+	const base = { handoff: { sessionId: ID }, homeFlags: ["--home", "/home/u/.pk/agent"], stdoutIsTTY: true, terminalHungUp: false, platform: "linux" as NodeJS.Platform, color: false };
+	for (const planner of [planResumeHint, runtime.planResumeHint]) {
+		assert.equal(planner({ ...base, commandName: "pk" }), `To resume in pk: pk --home /home/u/.pk/agent --session ${ID}\n`);
+		assert.equal(planner(base), `To resume in gentle-shell: gentle-shell --home /home/u/.pk/agent --session ${ID}\n`);
+		for (const commandName of ["", " pk", "pk ", "pk --flag", "/bin/pk", "./pk", "a/b", "a\\b", "-pk", ".", "..", "pk;echo", "pk\n", "pk\u001b", "pk$()", "pk'", "pk%PATH%", "pk:run"]) {
+			assert.equal(planner({ ...base, commandName }), undefined, JSON.stringify(commandName));
+		}
+		assert.equal(planner({ ...base, commandName: "pk", color: true }), `\u001b[2mTo resume in pk:\u001b[22m pk --home /home/u/.pk/agent --session ${ID}\n`);
+		assert.equal(planner({ ...base, commandName: "pk", handoff: { sessionId: ID, sessionFile: "/other project/x.jsonl" } }), `To resume in pk: pk --home /home/u/.pk/agent --session '/other project/x.jsonl'\n`);
+		assert.equal(planner({ ...base, commandName: "pk", handoff: { sessionId: ID, sessionDir: "/custom sessions" } }), `To resume in pk: pk --home /home/u/.pk/agent --session-dir '/custom sessions' --session ${ID}\n`);
+		for (const commandName of ["pk", "pk-dev", "pk_2", "pk.exe"]) {
+			assert.equal(planner({ ...base, commandName }), `To resume in ${commandName}: ${commandName} --home /home/u/.pk/agent --session ${ID}\n`);
+			assert.equal(planner({ ...base, commandName, stdoutIsTTY: false }), undefined);
+			assert.equal(planner({ ...base, commandName, terminalHungUp: true }), undefined);
+			assert.equal(planner({ ...base, commandName, platform: "win32", homeFlags: ["--home", "C:\\%TEMP%\\h"] }), undefined);
+		}
+	}
+});
+
 test("handoff env name is stable", () => {
 	assert.equal(RESUME_HANDOFF_ENV, "GENTLE_SHELL_RESUME_HANDOFF");
 });

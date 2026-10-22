@@ -6,6 +6,14 @@ For development, use [ODD and feature recovery](readme-reference.md#organic-driv
 
 Source map: [shell extension](../extensions/gentle-shell.ts), [shell bar](../lib/shell-bar.ts), [changes model](../lib/shell-changes.ts), [changes view](../lib/shell-changes-view.ts), [usage model](../lib/shell-usage.ts), [usage view](../lib/shell-usage-view.ts), [agents extension](../extensions/gentle-agents.ts), and [agent runner](../lib/agents-runner.ts).
 
+## Resume command identity
+
+On interactive quit, Gentle Shell appends its own resume hint without changing Pi's generic `pi --session` line. The default remains `To resume in gentle-shell: gentle-shell …`.
+
+A wrapper launcher can set `GENTLE_SHELL_RESUME_COMMAND=pk` for its child process to print `To resume in pk: pk --home <home> --session <id>`. Set this only in the wrapper, not globally. This changes the appended hint only, not CLI branding, runtime selection, or execution.
+
+The override must be a plain PATH command name: ASCII letters, digits or underscore first, then letters, digits, underscores, dots or hyphens. Paths, whitespace, flags, shell expressions and control characters suppress the appended hint rather than falling back. The wrapper must already exist on PATH; no command is executed to validate it. Home selection, session-directory and cross-project session-file arguments retain their existing quoting and safety checks. No hint is printed without a persisted handoff and a TTY, or after SIGHUP.
+
 ## Updating Pi safely
 
 Run `gentle-shell update` to update the Pi this launcher runs. It also works when that Pi is older than the required minimum version, which every other command refuses. Shell verifies npm/pnpm global listing JSON and canonical package roots before installing exactly one supplying package. This supports pnpm v11 linked stores without relying on `PNPM_HOME` containment. When the launcher runs its adjacent Pi peer, the supplier is the listed `gentle-pi` package itself: Shell is reinstalled at its current version so the package manager re-resolves the peer, because updating a separate global Pi never changes the peer a Shell install runs. A Pi found on `PATH` or through `GENTLE_SHELL_PI` is updated through its own listed global package; a package-manager shim is followed to the single `cli.js` it names. Pi and Shell are never combined into a comma install.

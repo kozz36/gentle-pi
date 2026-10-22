@@ -2249,6 +2249,7 @@ async function main() {
 		const exitCode = signal ? signalExitCode(signal) : (code ?? 1);
 		if (resumeHandoff) {
 			const hint = planResumeHint({
+				commandName: process.env.GENTLE_SHELL_RESUME_COMMAND,
 				handoff: resumeHandoff.read(),
 				homeFlags: homeSelectorFlags(home),
 				stdoutIsTTY: process.stdout.isTTY === true,
