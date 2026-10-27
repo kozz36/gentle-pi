@@ -292,7 +292,7 @@ export function createJobRegistry(deps: JobRegistryDeps) {
 			},
 		};
 		// Reserve capacity privately, without assigning an id or publishing a job.
-		const done = invocation.run(state, () => nativeTool.execute(args[0], args[1], abort.signal, args[3], args[4])).then(
+		const done = invocation.run(state, () => nativeTool.execute(args[0], args[1], abort.signal, args[3], args[4], args[5])).then(
 			result => {
 				const output = result.structuredContent;
 				const exitCode = output && typeof output === "object" && "exit_code" in output && typeof output.exit_code === "number"

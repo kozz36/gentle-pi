@@ -119,12 +119,12 @@ export function registerBackgroundJobTools(pi: ExtensionAPI, options: Background
 				label: { type: "string", maxLength: 80, description: "Short human-readable label, e.g. 'CI for PR 1834'." },
 			},
 		} as never,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
+		async execute(_id, params, _signal, _onUpdate, ctx, executionContext) {
 			const input = params as { command?: unknown; label?: unknown };
 			if (typeof input.command !== "string" || !input.command.trim()) throw new Error("bash_background requires a non-empty command");
 			const request = { command: input.command, cwd: ctx.cwd, ownerSessionId: options.sessionId(ctx), label: typeof input.label === "string" ? input.label : undefined };
 			const job = delegate
-				? await startAdmitted(request, _id, { command: input.command }, _signal, undefined, ctx)
+				? await startAdmitted(request, _id, { command: input.command }, _signal, undefined, ctx, executionContext)
 				: registry.start(request);
 			options.onChange?.();
 			return text(
@@ -154,13 +154,13 @@ export function registerBackgroundJobTools(pi: ExtensionAPI, options: Background
 				label: { type: "string", maxLength: 80, description: "Short human-readable label, e.g. 'CI checks for PR 1842'." },
 			},
 		} as never,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
+		async execute(_id, params, _signal, _onUpdate, ctx, executionContext) {
 			const input = params as { command?: unknown; label?: unknown; timeout_seconds?: unknown };
 			if (typeof input.command !== "string" || !input.command.trim()) throw new Error("monitor requires a non-empty command");
 			const timeoutSeconds = typeof input.timeout_seconds === "number" ? input.timeout_seconds : Number.NaN;
 			const request = { command: input.command, cwd: ctx.cwd, ownerSessionId: options.sessionId(ctx), label: typeof input.label === "string" ? input.label : undefined, timeoutSeconds };
 			const job = delegate
-				? await startMonitor!(request, _id, { command: input.command }, _signal, undefined, ctx)
+				? await startMonitor!(request, _id, { command: input.command }, _signal, undefined, ctx, executionContext)
 				: monitors.start(request);
 			options.onChange?.();
 			return text(
