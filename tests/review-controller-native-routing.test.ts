@@ -1691,6 +1691,89 @@ function untrackedStopFixture(
 	return { cwd, eligible, initial, target, selection };
 }
 
+function boundUntrackedStopFixture(t: test.TestContext) {
+	const fixture = untrackedStopFixture(t, "gentle-ai.review-integration.status/v9");
+	const baseRef = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture.cwd, encoding: "utf8" }).trim();
+	const preSelection = startStatus(fixture.cwd, baseRef);
+	const selectedTarget = startStatus(fixture.cwd, baseRef, [fixture.eligible]);
+	const schema = "gentle-ai.review-intended-untracked-selection/v2";
+	const selection: ReviewCollectInputV3 = { ...fixture.selection, schema,
+		arguments: fixture.selection.arguments.map((argument) => ({ ...argument, value: argument.name === "base_tree" ? preSelection.projection.baseTree : argument.name === "candidate_tree" ? preSelection.projection.currentCandidateTree : argument.value })), submission: {
+		...fixture.selection.submission!,
+		values: [{ ...fixture.selection.submission!.values[0]!, schema }],
+		argumentTokens: [...fixture.selection.submission!.argumentTokens, `--base-ref=${baseRef}`, "--committed-only=true", "--gate=pre-pr"],
+	} };
+	const initial: ReviewStatusV3 = { ...fixture.initial, projection: { ...preSelection.projection, kind: "base-diff" }, action: "start", nextTransition: {
+		...fixture.initial.nextTransition!, collect: { inputs: [selection] },
+	} };
+	return { ...fixture, initial, target: { ...selectedTarget, projection: { ...selectedTarget.projection, kind: "base-diff" as const } }, selection, baseRef };
+}
+
+for (const operation of ["inspect", "select-intended-untracked"] as const) {
+	test(`bound v2 ${operation} forwards pre-selection metadata and exact provider tokens`, async (t) => {
+		const { cwd, eligible, initial, target, selection, baseRef } = boundUntrackedStopFixture(t);
+		const submissions: Array<{ argumentTokens: readonly string[]; value: string }> = [];
+		const retained = new Map();
+		const native = {
+			reviewMode: async () => ({ operation: "status", scope: "clone", status: { global: "on", cloneLocal: "on", effective: "on", source: "clone_local" } }),
+			targetStatus: async (request: Record<string, unknown>) => {
+				if (request.intendedUntrackedSelection) {
+					submissions.push(request.intendedUntrackedSelection as never);
+					return operation === "inspect" ? { ...target, targetIdentity: `sha256:${"f".repeat(64)}`, projection: { ...target.projection, currentCandidateTree: "f".repeat(40) } } : target;
+				}
+				return initial;
+			},
+			start: async (request: Record<string, unknown>) => {
+				submissions.push(request.intendedUntrackedSelection as never);
+				return { lineageId: "selected", state: "reviewing", riskLevel: "low", selectedLenses: [], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: false, riskReasons: [], raw: {} };
+			},
+		} as unknown as NativeReviewCli;
+		const run = (parameters: Record<string, unknown>) => __testing.executeReviewControllerOperation(parameters as never, cwd, native, undefined, undefined, undefined, retained);
+		if (operation === "inspect") {
+			await run({ operation, input: JSON.stringify({ baseRef, committedOnly: true }), untrackedScope: "select", intendedUntracked: [eligible] });
+		} else {
+			const listed = await run({ operation: "inspect", input: JSON.stringify({ baseRef, committedOnly: true }) });
+			assert.equal(typeof listed.selectionBinding, "string");
+			const result = await run({ operation, selectionBinding: listed.selectionBinding, intendedUntracked: [eligible] });
+			assert.equal(submissions.length, 2, JSON.stringify(result));
+		}
+		assert.equal(submissions.length, operation === "inspect" ? 1 : 2);
+		for (const submission of submissions) assert.deepEqual(submission, submissions[0]);
+		assert.deepEqual(submissions[0]!.argumentTokens, selection.submission!.argumentTokens);
+		assert.deepEqual(JSON.parse(submissions[0]!.value), {
+			schema: selection.schema, untracked_scope: "select", expected_untracked_inventory: SHA,
+			intended_untracked: [eligible], target_identity: selection.arguments[0]!.value,
+			base_tree: selection.arguments[2]!.value, candidate_tree: selection.arguments[3]!.value,
+		});
+		// The answer always names the offered pre-selection snapshot, not a later STATUS.
+		assert.equal(JSON.parse(submissions[0]!.value).candidate_tree, initial.projection.currentCandidateTree);
+	});
+}
+
+test("bound v2 stale or mismatched metadata refuses before submission", async (t) => {
+	const { cwd, initial, selection, eligible } = boundUntrackedStopFixture(t);
+	for (const corrupt of ["target_identity", "base_tree", "candidate_tree", "descriptor"] as const) {
+		const invalid: ReviewCollectInputV3 = { ...selection,
+			arguments: selection.arguments.map((argument) => argument.name === corrupt ? { ...argument, value: corrupt === "target_identity" ? `sha256:${"f".repeat(64)}` : SHA } : argument),
+			...(corrupt === "descriptor" ? { submission: { ...selection.submission!, values: [{ ...selection.submission!.values[0]!, schema: "gentle-ai.review-intended-untracked-selection/v1" }] } } : {}),
+		};
+		const malformed: ReviewStatusV3 = { ...initial, nextTransition: { ...initial.nextTransition!, collect: { inputs: [invalid] } } };
+		let submissions = 0;
+		let current = initial;
+		const native = {
+			targetStatus: async (request: Record<string, unknown>) => { if (request.intendedUntrackedSelection) submissions++; return current; },
+			start: async () => { submissions++; throw new Error("unexpected mock START"); },
+		} as unknown as NativeReviewCli;
+		const listed = await __testing.executeReviewControllerOperation({ operation: "inspect" }, cwd, native);
+		current = malformed;
+		const inspected = await __testing.executeReviewControllerOperation({ operation: "inspect", untrackedScope: "select", intendedUntracked: [eligible] }, cwd, native);
+		assert.equal(inspected.status, "blocked", corrupt);
+		const selected = await __testing.executeReviewControllerOperation({ operation: "select-intended-untracked", selectionBinding: listed.selectionBinding as string, intendedUntracked: [eligible] }, cwd, native);
+		assert.equal(selected.outcome, "intended-untracked-selection-binding-rejected", corrupt);
+		assert.equal(submissions, 0, corrupt);
+	}
+});
+
 for (const statusSchema of [
 	"gentle-ai.review-integration.status/v6",
 	"gentle-ai.review-integration.status/v7",

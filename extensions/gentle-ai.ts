@@ -8624,9 +8624,23 @@ function reviewIntendedUntrackedInput(status: ReviewStatusV3): ReviewCollectInpu
 	if (!statusCarriesIntendedUntrackedSelection(status.raw.schema) || status.nextTransition?.kind !== "collect") return undefined;
 	const matches = (status.nextTransition.collect?.inputs ?? []).filter((input) => {
 		const value = input.submission?.values[0];
-		return input.name === "intended_untracked_selection" && input.schema === "gentle-ai.review-intended-untracked-selection/v1" && input.captureOperation === "external.select_intended_untracked" && input.submission?.operationToken === "status" && input.submission.values.length === 1 && value?.slot === "intended_untracked_selection" && value.domain === "schema_bound_json";
+		return input.name === "intended_untracked_selection" && (input.schema === "gentle-ai.review-intended-untracked-selection/v1" || input.schema === "gentle-ai.review-intended-untracked-selection/v2") && input.captureOperation === "external.select_intended_untracked" && input.submission?.operationToken === "status" && input.submission.values.length === 1 && value?.slot === "intended_untracked_selection" && value.domain === "schema_bound_json" && value.schema === input.schema && value.substitutionLocation === 4;
 	});
-	return matches.length === 1 ? matches[0] : undefined;
+	const input = matches.length === 1 ? matches[0] : undefined;
+	if (input === undefined) return undefined;
+	if (exactCollectArgument(input, "target_identity") !== status.targetIdentity || exactCollectArgument(input, "projection") !== status.projection.projection || exactCollectArgument(input, "base_tree") !== status.projection.baseTree || exactCollectArgument(input, "candidate_tree") !== status.projection.currentCandidateTree) return undefined;
+	return input;
+}
+
+function intendedUntrackedAnswer(input: ReviewCollectInputV3, scope: string, inventory: string | undefined, paths: readonly string[] | undefined): string {
+	return JSON.stringify({
+		schema: input.schema, untracked_scope: scope, expected_untracked_inventory: inventory, intended_untracked: paths,
+		...(input.schema === "gentle-ai.review-intended-untracked-selection/v2" ? {
+			target_identity: exactCollectArgument(input, "target_identity"),
+			base_tree: exactCollectArgument(input, "base_tree"),
+			candidate_tree: exactCollectArgument(input, "candidate_tree"),
+		} : {}),
+	});
 }
 
 // gentle-pi#706: the inspect stop on the intended-untracked selection carries no
@@ -9286,6 +9300,7 @@ async function executeReviewControllerOperation(
 				if (input === undefined)
 					return {
 						...plainMapped,
+						...(status.nextTransition?.collect?.inputs.some((row) => row.captureOperation === "external.select_intended_untracked") ? { status: "blocked", outcome: "intended-untracked-selection-binding-rejected", mutation_performed: false, mutation_outcome: "none" } : {}),
 						untracked_selection: "not-required",
 						...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}),
 					};
@@ -9319,12 +9334,7 @@ async function executeReviewControllerOperation(
 				}
 				const submission: NativeIntendedUntrackedSelectionSubmission = {
 					argumentTokens: input.submission!.argumentTokens,
-					value: JSON.stringify({
-						schema: "gentle-ai.review-intended-untracked-selection/v1",
-						untracked_scope: parameters.untrackedScope,
-						expected_untracked_inventory: inventory,
-						intended_untracked: selected.intendedUntracked,
-					}),
+					value: intendedUntrackedAnswer(input, parameters.untrackedScope, inventory, selected.intendedUntracked),
 				};
 				const resolved = await negotiatedStatusForHostTransport(
 					nativeReviewCli,
@@ -9752,7 +9762,7 @@ async function executeReviewControllerOperation(
 		const selected = validateNativeStartUntrackedSelection({ untrackedScope: scope, expectedUntrackedInventory: inventory, intendedUntracked: parameters.intendedUntracked });
 		const rejected = (stopSelector !== undefined && stopSelector.targetIdentity !== status.targetIdentity) || input === undefined || canonicalReviewCaptureBinding(input) !== canonicalBinding || exactCollectArgument(input, "target_identity") !== status.targetIdentity || exactCollectArgument(input, "projection") !== status.projection.projection || exactCollectArgument(input, "base_tree") !== status.projection.baseTree || exactCollectArgument(input, "candidate_tree") !== status.projection.currentCandidateTree || !Array.isArray(eligible) || selected.reason !== undefined || selected.intendedUntracked!.some((path) => !eligible.includes(path));
 		if (rejected) return { operation: parameters.operation, status: "blocked", outcome: "intended-untracked-selection-binding-rejected", mutation_performed: false, mutation_outcome: "none" };
-		const submission = { argumentTokens: input.submission!.argumentTokens, value: JSON.stringify({ schema: "gentle-ai.review-intended-untracked-selection/v1", untracked_scope: scope, expected_untracked_inventory: inventory, intended_untracked: selected.intendedUntracked }) };
+		const submission = { argumentTokens: input.submission!.argumentTokens, value: intendedUntrackedAnswer(input, scope, inventory, selected.intendedUntracked) };
 		const result = await executeReviewControllerOperation({ operation: REVIEW_CONTROLLER_OPERATION.START, ...(parameters.workspaceRoot === undefined ? {} : { workspaceRoot: parameters.workspaceRoot }), input: JSON.stringify({ mode: REVIEW_MODE.ORDINARY, ...committedSelector, untrackedScope: scope, expectedUntrackedInventory: inventory, intendedUntracked: selected.intendedUntracked }) }, sessionCwd, nativeReviewCli, signal, candidateViews, context, retainedUntrackedSelections, pendingReviewConsentRegistry, pendingReviewConsentFallbackKey, submission);
 		return { ...result, operation: parameters.operation };
 	}

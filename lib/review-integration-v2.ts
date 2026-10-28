@@ -1466,7 +1466,7 @@ function decodeTransitionArguments(value: unknown, label: string): readonly Revi
 	});
 }
 
-function decodeCaptureSubmission(value: unknown, label: string, v5: boolean, v6: boolean, captureOperation: string): ReviewCaptureSubmissionV1 {
+function decodeCaptureSubmission(value: unknown, label: string, v5: boolean, v6: boolean, captureOperation: string, boundV2: boolean): ReviewCaptureSubmissionV1 {
 	// status/v6 adds the provider-owned intended-untracked selection form.
 	if (v6 && captureOperation === "external.select_intended_untracked" && typeof value === "object" && value !== null && (value as Record<string, unknown>).operation_token === "status") {
 		const submission = exactRecord(value, label, ["operation_token", "argument_tokens", "value"]);
@@ -1475,8 +1475,12 @@ function decodeCaptureSubmission(value: unknown, label: string, v5: boolean, v6:
 			"--projection=workspace", "--intended-untracked-selection={{value}}",
 		] as const;
 		const operationToken = enumeration(submission.operation_token, ["status"] as const, `${label}.operation_token`);
-		const argumentTokens = stringArray(submission.argument_tokens, `${label}.argument_tokens`, { minimum: expectedTokens.length, maximum: expectedTokens.length });
-		if (argumentTokens.some((token, index) => token !== expectedTokens[index])) throw new TypeError(`${label}.argument_tokens substitution binding is invalid`);
+		const argumentTokens = stringArray(submission.argument_tokens, `${label}.argument_tokens`, { minimum: expectedTokens.length, maximum: expectedTokens.length + (boundV2 ? 3 : 0) });
+		const bound = (submission.value as Record<string, unknown> | null)?.schema === "gentle-ai.review-intended-untracked-selection/v2";
+		const suffix = argumentTokens.slice(expectedTokens.length);
+		const hasBase = suffix[0]?.startsWith("--base-ref=") && /^--base-ref=[^\s\x00-\x1f]+$/.test(suffix[0]);
+		const legalSuffix = suffix.length === 0 || (suffix.length === 1 && suffix[0] === "--gate=pre-pr") || (hasBase && suffix[1] === "--committed-only=true" && (suffix.length === 2 || (suffix.length === 3 && suffix[2] === "--gate=pre-pr")));
+		if (expectedTokens.some((token, index) => argumentTokens[index] !== token) || (!bound && suffix.length !== 0) || !legalSuffix) throw new TypeError(`${label}.argument_tokens substitution binding is invalid`);
 		const row = exactRecord(submission.value, `${label}.value`, ["slot", "domain", "schema", "substitution_location"]);
 		return {
 			operationToken,
@@ -1484,7 +1488,7 @@ function decodeCaptureSubmission(value: unknown, label: string, v5: boolean, v6:
 			values: [{
 				slot: enumeration(row.slot, ["intended_untracked_selection"] as const, `${label}.value.slot`),
 				domain: enumeration(row.domain, ["schema_bound_json"] as const, `${label}.value.domain`),
-				schema: enumeration(row.schema, ["gentle-ai.review-intended-untracked-selection/v1"] as const, `${label}.value.schema`),
+				schema: enumeration(row.schema, boundV2 ? ["gentle-ai.review-intended-untracked-selection/v1", "gentle-ai.review-intended-untracked-selection/v2"] as const : ["gentle-ai.review-intended-untracked-selection/v1"] as const, `${label}.value.schema`),
 				substitutionLocation: integer(row.substitution_location, `${label}.value.substitution_location`, 4, 4),
 			}],
 		};
@@ -1686,9 +1690,9 @@ function decodeCollectInput(value: unknown, label: string, v5: boolean, v6: bool
 
 	const intendedUntracked = v6
 		&& name === "intended_untracked_selection"
-		&& schema === "gentle-ai.review-intended-untracked-selection/v1"
+		&& (schema === "gentle-ai.review-intended-untracked-selection/v1" || (v9 && schema === "gentle-ai.review-intended-untracked-selection/v2"))
 		&& captureOperation === "external.select_intended_untracked";
-	if (captureOperation === "external.select_intended_untracked" && (name !== "intended_untracked_selection" || schema !== "gentle-ai.review-intended-untracked-selection/v1")) {
+	if (captureOperation === "external.select_intended_untracked" && (name !== "intended_untracked_selection" || (schema !== "gentle-ai.review-intended-untracked-selection/v1" && !(v9 && schema === "gentle-ai.review-intended-untracked-selection/v2")))) {
 		throw new TypeError(`${label} external.select_intended_untracked requires the intended_untracked_selection binding`);
 	}
 	if (intendedUntracked) {
@@ -1807,7 +1811,8 @@ function decodeCollectInput(value: unknown, label: string, v5: boolean, v6: bool
 
 	const submission = input.submission === undefined
 		? undefined
-		: decodeCaptureSubmission(input.submission, `${label}.submission`, v5, v6, captureOperation);
+		: decodeCaptureSubmission(input.submission, `${label}.submission`, v5, v6, captureOperation, v9 && schema === "gentle-ai.review-intended-untracked-selection/v2");
+	if (intendedUntracked && submission?.values[0]?.schema !== schema) throw new TypeError(`${label}.submission schema must match input schema`);
 
 	return {
 		name,

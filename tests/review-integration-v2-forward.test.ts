@@ -71,6 +71,51 @@ function initialIntendedUntrackedStatusV6(): JsonObject {
 	return body;
 }
 
+test("v1 compatibility preserves the original suffix length error", () => {
+	const body = initialIntendedUntrackedStatusV6();
+	const input = ((body.next_transition as JsonObject).collect as { inputs: JsonObject[] }).inputs[0]!;
+	(input.submission as JsonObject).argument_tokens = [...((input.submission as JsonObject).argument_tokens as string[]), "--base-ref=HEAD", "--committed-only=true"];
+	assert.throws(() => decodeReviewStatusV3(body), { name: "TypeError", message: "next_transition.collect.inputs[0].submission.argument_tokens has an invalid length" });
+});
+
+test("v1 compatibility preserves the original descriptor schema error", () => {
+	const body = initialIntendedUntrackedStatusV6();
+	const input = ((body.next_transition as JsonObject).collect as { inputs: JsonObject[] }).inputs[0]!;
+	((input.submission as JsonObject).value as JsonObject).schema = "gentle-ai.review-intended-untracked-selection/v2";
+	assert.throws(() => decodeReviewStatusV3(body), { name: "TypeError", message: "next_transition.collect.inputs[0].submission.value.schema is unsupported" });
+});
+
+test("bound v2 intended-untracked STATUS accepts provider metadata", () => {
+	const body = initialIntendedUntrackedStatusV6();
+	body.schema = "gentle-ai.review-integration.status/v9";
+	const input = ((body.next_transition as JsonObject).collect as { inputs: JsonObject[] }).inputs[0]!;
+	input.schema = "gentle-ai.review-intended-untracked-selection/v2";
+	((input.submission as JsonObject).value as JsonObject).schema = input.schema;
+	assert.doesNotThrow(() => decodeReviewStatusV3(body));
+	const submission = input.submission as JsonObject;
+	for (const suffix of [[], ["--gate=pre-pr"], ["--base-ref=HEAD", "--committed-only=true"], ["--base-ref=HEAD", "--committed-only=true", "--gate=pre-pr"]]) {
+		submission.argument_tokens = [...(submission.argument_tokens as string[]).slice(0, 5), ...suffix];
+		assert.doesNotThrow(() => decodeReviewStatusV3(body));
+	}
+	for (const suffix of [["--execute=true"], ["--base-ref=HEAD"], ["--committed-only=true"], ["--gate=other"], ["--base-ref=", "--committed-only=true"], ["--gate=pre-pr", "--gate=pre-pr"]]) {
+		submission.argument_tokens = [...(submission.argument_tokens as string[]).slice(0, 5), ...suffix];
+		assert.throws(() => decodeReviewStatusV3(body), /binding/);
+	}
+	submission.argument_tokens = (submission.argument_tokens as string[]).slice(0, 5);
+	for (const index of [0, 1, 2, 3, 5]) {
+		const arguments_ = input.arguments as JsonObject[];
+		const previous = arguments_[index]!.value;
+		arguments_[index]!.value = "invalid";
+		assert.throws(() => decodeReviewStatusV3(body));
+		arguments_[index]!.value = previous;
+	}
+	(submission.value as JsonObject).schema = "gentle-ai.review-intended-untracked-selection/v1";
+	assert.throws(() => decodeReviewStatusV3(body), /schema/);
+	(submission.value as JsonObject).schema = input.schema;
+	body.schema = "gentle-ai.review-integration.status/v7";
+	assert.throws(() => decodeReviewStatusV3(body), /binding/);
+});
+
 test("captured capabilities retain their exact schema identity", () => {
 	const capabilities = decodeReviewCapabilitiesV2(
 		fixture(DEV_FIXTURES, "capabilities-v2.2.captured.json"),
