@@ -7,13 +7,14 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
-import { sdk, fauxProvider, fauxAssistantMessage, fauxToolCall, createGentleAiExtension, createNativeSession } from "./support/bash-preexec-fixture.ts";
+import { sdk, fauxProvider, fauxAssistantMessage, fauxToolCall, createGentleAiExtension, createNativeSession, observeNativeAdmissions, type AdmissionObservation } from "./support/bash-preexec-fixture.ts";
+import { resolvePermissionModePolicy, writePermissionModePolicy } from "../lib/permission-mode-policy.ts";
 const { default: pretty } = await import("../extensions/pi-pretty.ts");
 
 const artifacts = resolve(tmpdir(), "gp-preexec-integration");
 mkdirSync(artifacts, { recursive: true, mode: 0o700 });
 
-for (const scenario of ["approved", "denied", "headless", "error", "cancelled", "policy-changed", "replaced", "delegate-changed", "backend-opaque", "hard-denied", "child-denied", "safe", "safe-headless", "pretty", "opaque-pretty", "pretty-denied", "pretty-headless", "pretty-error", "pretty-cancelled", "pretty-replaced"] as const) {
+for (const scenario of ["approved", "denied", "headless", "error", "cancelled", "policy-changed", "replaced", "delegate-changed", "backend-opaque", "hard-denied", "child-denied", "safe", "safe-headless", "pretty", "opaque-pretty", "pretty-denied", "pretty-headless", "pretty-error", "pretty-cancelled", "pretty-replaced", "super-safe", "super-hard-denied", "super-sensitive", "super-sensitive-quoted", "super-sensitive-redirection", "super-sensitive-inline", "super-sensitive-background", "super-sensitive-monitor", "super-sensitive-continuation", "super-sensitive-quoted-continuation", "super-sensitive-redirection-continuation"] as const) {
 test(`GP final native invocation: ${scenario}`, async () => {
 	const mode = scenario.startsWith("pretty-") ? scenario.slice(7) : scenario;
 	const cwd = mkdtempSync(join(artifacts, "session-"));
@@ -22,7 +23,15 @@ test(`GP final native invocation: ${scenario}`, async () => {
 	mkdirSync(finalCwd); mkdirSync(agentDir);
 	const command = "printf raw";
 	const guardedCommand = `npm() { printf admitted; };\n# ${"long ".repeat(50)}\nnpm publish; printf x >> effect`;
-	const finalCommand = mode === "hard-denied" ? "rm -rf /"
+	const toolName = mode === "super-sensitive-background" ? "bash_background" : mode === "super-sensitive-monitor" ? "monitor" : "bash";
+	const finalCommand = mode === "super-sensitive-inline" ? "sh -c 'cat .env'"
+		: mode === "super-sensitive-quoted" ? "cat '.env'"
+		: mode === "super-sensitive-redirection" ? "cat<.env"
+		: mode === "super-sensitive-continuation" ? "cat .en\\\nv"
+		: mode === "super-sensitive-quoted-continuation" ? "cat \".en\\\nv\""
+		: mode === "super-sensitive-redirection-continuation" ? "cat<.en\\\nv"
+		: mode.startsWith("super-sensitive") ? "cat .env"
+		: mode === "hard-denied" || mode === "super-hard-denied" ? "rm -rf /"
 		: mode === "child-denied" ? "rm -rf owned-negative-fixture"
 		: mode === "safe" || mode === "safe-headless" ? "printf admitted; printf x >> effect" : guardedCommand;
 	let backendCalls = 0;
@@ -37,15 +46,19 @@ test(`GP final native invocation: ${scenario}`, async () => {
 	childProcess.spawn = ((...args: Parameters<typeof realSpawn>) => {
 		starts++;
 		// Destructive strings are never passed to an actual OS process, even if a regression permits one.
-		if (mode === "hard-denied" || mode === "child-denied") throw new Error("Forbidden process creation in a negative destructive fixture");
+		if (mode === "hard-denied" || mode === "super-hard-denied" || mode.startsWith("super-sensitive") || mode === "child-denied") throw new Error("Forbidden process creation in a negative destructive fixture");
 		return Reflect.apply(realSpawn, childProcess, args);
 	}) as typeof realSpawn;
 	syncBuiltinESMExports();
-	const { session, faux } = await createNativeSession({ cwd, agentDir,
-		extensionFactories: [createGentleAiExtension({ nativeReviewCli: null, resolveTelemetryTriggerBinary: () => { throw new Error("Telemetry disabled in native fixture"); }, processEnv: { ...process.env, GENTLE_PI_AGENTS_CHILD: mode === "child-denied" ? "1" : "0" } }),
+	const superConfigHome = join(cwd, "super-config");
+	if (mode.startsWith("super-")) writePermissionModePolicy("super-yolo", { gentlePiConfigHome: superConfigHome });
+	const admissions: AdmissionObservation[] = [];
+	const gentle = createGentleAiExtension({ nativeReviewCli: null, resolveTelemetryTriggerBinary: () => { throw new Error("Telemetry disabled in native fixture"); }, processEnv: { ...process.env, ...(mode.startsWith("super-") ? { GENTLE_PI_CONFIG_HOME: superConfigHome } : {}), GENTLE_PI_AGENTS_CHILD: mode === "child-denied" ? "1" : "0" } });
+	const { session, faux } = await createNativeSession({ cwd, agentDir, tools: [toolName],
+		extensionFactories: [(pi: Parameters<ReturnType<typeof createGentleAiExtension>>[0]) => gentle(observeNativeAdmissions(pi, admissions)),
 			async (pi: Parameters<ReturnType<typeof createGentleAiExtension>>[0]) => {
 				replace = () => pi.registerTool({ ...definition });
-				if (!usePretty) { pi.registerTool(definition); return; }
+				if (!usePretty) { pi.registerTool(toolName === "bash" ? definition : { ...definition, name: toolName }); return; }
 				process.env.GENTLE_PI_QUIET_TOOLS = "0";
 				process.env.PRETTY_DISABLE_TOOLS = "read,ls,find,grep";
 				const deps = { sdk, fffModule: { FileFinder: { create: () => ({ ok: false, error: "Test indexing disabled" }) } } };
@@ -61,7 +74,7 @@ test(`GP final native invocation: ${scenario}`, async () => {
 				}
 			}] });
 
-	const outcomes: { isError: boolean; result: { structuredContent?: { output: string; exit_code: number } } }[] = [];
+	const outcomes: { isError: boolean; result: { content: Array<{ type: string; text?: string }>; structuredContent?: { output: string; exit_code: number } } }[] = [];
 	session.subscribe((event: { type: string }) => { if (event.type === "tool_execution_end") outcomes.push(event as unknown as typeof outcomes[number]); });
 	let confirms = 0;
 	let release!: (value: boolean) => void;
@@ -78,11 +91,11 @@ test(`GP final native invocation: ${scenario}`, async () => {
 	await session.bindExtensions(mode === "headless" || mode === "safe-headless" ? { mode: "rpc" } : { mode: "rpc", uiContext: ui });
 	// The pinned pretty factory receives its untransformed command directly.
 	const inputCommand = usePretty ? guardedCommand : command;
-	faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: inputCommand, timeout: 2 })], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+	faux.setResponses([fauxAssistantMessage([fauxToolCall(toolName, { command: inputCommand, timeout: 2 })], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
 	const pending = session.prompt("Run the harmless owned counter.");
 	try {
 		await Promise.race([waiting, pending]);
-		const needsUI = !["headless", "backend-opaque", "hard-denied", "child-denied", "safe", "safe-headless", "opaque-pretty"].includes(mode);
+		const needsUI = !mode.startsWith("super-") && !["headless", "backend-opaque", "hard-denied", "child-denied", "safe", "safe-headless", "opaque-pretty", "super-safe", "super-hard-denied", "super-sensitive"].includes(mode);
 		assert.equal(confirms, needsUI ? 1 : 0, "only the final supported guarded command requests confirmation");
 		if (needsUI && mode !== "error") {
 			assert.equal(starts, 0, "waiting produces zero native starts");
@@ -100,9 +113,18 @@ test(`GP final native invocation: ${scenario}`, async () => {
 			} else release(mode !== "denied");
 		}
 		await pending;
-		const allowed = mode === "approved" || mode === "safe" || mode === "safe-headless" || mode === "pretty";
+		const allowed = mode === "approved" || mode === "safe" || mode === "safe-headless" || mode === "pretty" || mode === "super-safe";
 		assert.equal(starts, allowed ? 1 : 0);
 		assert.equal(backendCalls, 0); assert.equal(opaqueCalls, 0);
+		if (mode.startsWith("super-")) {
+			assert.equal(admissions.filter(visit => visit.method === "evaluate").length, 1, "Super Yolo still evaluates the genuine final native plan");
+			assert.equal(admissions.filter(visit => visit.method === "approve").length, 0, "Super Yolo never asks for execution approval");
+			assert.ok(admissions.filter(visit => visit.method === "isValid").every(visit => visit.result === true));
+			assert.equal(resolvePermissionModePolicy({ gentlePiConfigHome: superConfigHome }).mode, "super-yolo", "execution does not rewrite the saved mode");
+			if (!allowed) assert.equal(outcomes[0].result.content.map(block => block.text ?? "").join("\n"), mode === "super-hard-denied"
+				? "Gentle AI safety policy blocked a catastrophic destructive shell command. Ask the user for an explicit safer plan."
+				: "Gentle AI safety policy blocked access to sensitive path: .env. Ask the user for an explicit safer plan.");
+		}
 		const effect = join(usePretty ? cwd : finalCwd, "effect");
 		assert.equal(existsSync(effect), allowed);
 		if (allowed) {

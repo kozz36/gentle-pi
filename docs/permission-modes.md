@@ -1,6 +1,6 @@
 # Choose how permission questions are handled
 
-Use **Normal**, **Auto**, or **YOLO** for the current primary session. Optionally save any of them as the user-global default for future sessions. These modes do not redesign Gentle Shell delegation, expand the task you authorized, or replace independent safety and consent.
+Use **Normal**, **Auto**, **YOLO**, or **Super Yolo** for the current primary session. Optionally save any of them as the user-global default for future sessions. These modes do not redesign Gentle Shell delegation, expand the task you authorized, or replace independent safety and consent.
 
 ## Restricted final Bash admission (isolated development)
 
@@ -8,9 +8,9 @@ This development integration requires the patched SDK's native final local-Bash 
 
 - Canonical SDK Bash definitions using the standard local backend support guarded native admission, including the original default quiet-profile owner. `requireAdmission: true` additionally rejects direct calls without an execution context; it is not required for dispatcher eligibility. The pinned pi-pretty adapter keeps this strict option without replacing the executor's configuration, renderers or metrics.
 - For the pinned pretty plugin's five-argument delegate, the registered wrapper carries only its explicit SDK-supplied sixth argument in invocation-local Node async storage. The original SDK executor receives that exact argument; explicit delegate contexts are never overwritten. Plugin execution, metrics and rendering remain intact, and SDK identity, revocation and admission validation remain authoritative. The carrier is disabled when execution settles, including failure or cancellation.
-- Policy runs on the final command after prefix, spawn-hook, shell and timeout preparation, including initially safe commands. Configuration remains owned by the calling session's cwd, not the transformed target cwd.
+- Policy runs on the final command after prefix, spawn-hook, shell and timeout preparation, including initially safe commands. Delivered-test guards also inspect these final arguments. Final Bash admission conservatively rejects literal private-path words (including quoted paths, literal backslash-newline continuations and redirection operands), using the existing path patterns and shell lexer in every mode. This can reject literal mentions too; it is not a sandbox and does not resolve dynamic expansions or loaded scripts. Configuration remains owned by the calling session's cwd, not the transformed target cwd.
 - Confirmation displays the complete command, target cwd, effective timeout, shell, argv and command transport. It does not display environment values. Approval applies only to that invocation; configuration, mode, session or executor changes invalidate pending work.
-- Configured blocks, hard denials and child-safety denials remain non-appealable. Headless confirmation, cancellation, UI errors and nonaffirmative answers do not authorize a process.
+- In Normal, Auto and YOLO, configured blocks remain non-appealable. Super Yolo bypasses configurable confirmation policy, not the native SDK gate, sensitive-path checks, delivered-test guards, code-level catastrophic denials or child-safety boundaries. It does not request execution approval. Headless confirmation, cancellation, UI errors and nonaffirmative answers never substitute for admission.
 - Old runtimes, unknown executors, opaque supplied pretty functions/factories and custom backends fail closed. Lost execution context or replacement during pending admission cannot authorize a process. The adapter does not replace supplied executors with defaults or provide an early-preview fallback. Other tools retain their existing permission behavior.
 
 These are integration boundaries, not an OS sandbox or a claim that an active installation has been verified. Cross-session/concurrent integration verification and delivery remain separate work.
@@ -66,14 +66,15 @@ Changing the default does **not** change the current session. To return this ses
 | **Normal** | Existing permission behavior; the default when no valid global preference exists. |
 | **Auto** | A separate reviewer using the current session model checks eligible actions against live user intent before execution. Local reads are classified too; locality does not exempt an action from explicit restrictions. |
 | **YOLO** | Standing permission for ordinary already-authorized work and delivery; no Auto classifier. Destructive and independent consent boundaries remain, except recursive removal of the session's own [temp scratch](yolo-mode.md#temp-scratch-removal). [Full YOLO details](yolo-mode.md). |
+| **Super Yolo** | No permission prompts at all, including data-loss confirmations and configured guardrail actions. The only remaining line is the sensitive-path guard: read/write/edit of `.env`, `.ssh`, keychains, `*.pem/*.key/*.p12/*.pfx`, `secrets/` and cloud credential files stays hard-blocked. Code-level catastrophic denies (`rm -rf /`, `--no-preserve-root`, `git reset --hard`, forced clean, force push) also remain. |
 
 ## Commands and menu
 
 | Command | Effect |
 | --- | --- |
-| `/gentle:mode normal`, `auto`, or `yolo` | Select exactly one mode for the current interactive primary session. |
+| `/gentle:mode normal`, `auto`, `yolo`, or `super-yolo` | Select exactly one mode for the current interactive primary session. |
 | `/gentle:mode status` or `/gentle:mode` | Show current mode and saved default. |
-| `/gentle:mode default normal`, `auto`, or `yolo` | Save the default for new primary sessions, leaving the current mode unchanged. |
+| `/gentle:mode default normal`, `auto`, `yolo`, or `super-yolo` | Save the default for new primary sessions, leaving the current mode unchanged. |
 | `/gentle:yolo enable`, `disable`, or `status` | Existing shortcut; enable selects YOLO, disable selects Normal. |
 
 In `/gentle:customize` → **Editor**, use **Session permissions** to change the current mode, or **Default permissions** to save a future-session preference. The original **YOLO: ON/OFF · session only** row still toggles the live mode; it does not save a default. Browsing, previews, and closing the menu do not grant permission.
@@ -128,6 +129,10 @@ The **Auto checks** status and `gentle-auto-permission` session entries account 
 ## Persistence and lifetime
 
 The dedicated `permission-mode.json` in Gentle Pi's resolved user config home contains a strict versioned preference. Saving uses a private atomic replacement; malformed or unreadable existing preferences fall back to Normal and refuse an overwrite until repaired. Use the human command/menu path rather than asking model tools to edit this authority file.
+
+Model `write`/`edit` calls keep the config home protected except for the main-channel updater's `dev-binary.json`, `channel.json`, `main/` and `tools/go`. Those destinations select or build executable code, so they still require authorization under the current mode's ordinary checks; Auto classifies them and can deny an update. They are not automatically allowed. Permission preferences, global and project `runtime-guardrails.json`, their parent directories and symlink aliases resolving to them stay blocked even if a classifier would allow the action. Other config-home state, including model routing, persona and privacy preferences, remains protected.
+
+Shell recognition remains deliberately conservative: commands mentioning the config home or policy filenames can still be blocked. This change does not relax shell protection, authorize routing around a denial, or turn the hook into a sandbox.
 
 Live mode selection is bound to the SessionManager, session ID and canonical Git clone identity, or the canonical workspace directory outside Git. Session replacement, shutdown and reload revoke live callbacks and pending actions. A newly initialized primary session may select its saved default; this is a new application of the global preference, not restoration of an old session grant. Disable the saved default as well if future sessions must stay Normal.
 

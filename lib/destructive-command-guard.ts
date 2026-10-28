@@ -49,6 +49,15 @@ function tokenize(command: string, blank = true): Token[] {
 	}
 	return tokens;
 }
+/** Conservative literal words only; reuses the lexer, never expands or interprets shell code. */
+export function findLiteralShellWord(command: string, matches: (word: string) => boolean): string | undefined {
+	// Normalize literal continuations only here; shared destructive-token offsets stay intact.
+	const literalCommand = command.replace(/\\\n/g, "");
+	return tokenize(literalCommand).filter(token => !token.operator)
+		.flatMap(token => token.value.split(/[\s<>]+/))
+		.map(word => word.replace(/^(?:--?[\w-]+|[A-Za-z_]\w*)=/, ""))
+		.find(matches);
+}
 const executable = (value: string) => value.split("/").at(-1) ?? value;
 
 const WRAPPER_VALUE_OPTIONS: Record<string, readonly string[]> = {

@@ -12,6 +12,15 @@ import { basename } from "node:path";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+/** UI chains settle across a load-dependent number of turns: wait on the
+ * observable state instead of assuming a fixed tick count landed the async
+ * step (gentle-shell#2498). The deadline keeps a broken chain failing fast. */
+const settleUntil = async (predicate: () => boolean, what: string): Promise<void> => {
+	const deadline = Date.now() + 5000;
+	while (!predicate() && Date.now() < deadline) await tick();
+	assert.ok(predicate(), `timed out waiting for ${what}`);
+};
+
 /** Real packaged WAVs so a valid path uses an existing fixture, never a synthetic name. */
 const WAV_FIXTURE = fileURLToPath(new URL("../assets/sounds/success.wav", import.meta.url));
 /** Validation scenarios require a fully visible field, even in a deeply nested checkout. */
@@ -239,7 +248,7 @@ test("an in-flight local sound validation keeps busy, blocking a second field an
 		assert.deepEqual(getNotificationService()!.getState().settings, before, "an unseen choice leaves settings unchanged");
 		renderVisibleSoundField(view);
 		view.handleInput("\r");
-		await tick();
+		await settleUntil(() => validated.length === 1, "the submitted value to start validating");
 		assert.deepEqual(validated, [`file:${WAV_FIXTURE}`], "the submitted value is validated exactly once");
 		// Validation is still pending: `f` must not open a second field and Enter must not write.
 		view.handleInput("f");
@@ -250,11 +259,11 @@ test("an in-flight local sound validation keeps busy, blocking a second field an
 		assert.deepEqual(getNotificationService()!.getState().settings, before, "pending validation leaves settings unchanged");
 		// Resolve: a single write, then busy releases for the next edit.
 		resolveValidation(true);
-		await tick(); await tick();
+		await settleUntil(() => h.writes === 1, "the resolved validation to write exactly once");
 		assert.equal(h.writes, 1, "the resolved validation writes exactly once");
 		assert.equal(getNotificationService()!.getState().settings.audio.events["agent.failed"], `file:${WAV_FIXTURE}`);
 		view.handleInput("f");
-		assert.match(view.render(160).join("\n"), /Local audio path/, "busy is released so the next edit opens a fresh field");
+		await settleUntil(() => view.render(160).join("\n").includes("Local audio path"), "busy released so the next edit opens a fresh field");
 	} finally { h.owner.retire(); }
 });
 
@@ -279,7 +288,8 @@ test("disposing the card while validation is in flight never writes the stale ch
 	const h = harness(); try {
 		const rows = h.rows();
 		let resolveValidation!: (value: boolean) => void;
-		getNotificationService()!.validateFile = () => new Promise<boolean>(resolve => { resolveValidation = resolve; });
+		let validationStarted = false;
+		getNotificationService()!.validateFile = () => { validationStarted = true; return new Promise<boolean>(resolve => { resolveValidation = resolve; }); };
 		const view = customizeView(rows);
 		await expandAndSelect(view, "agent.failed:");
 		view.handleInput("f");
@@ -287,7 +297,9 @@ test("disposing the card while validation is in flight never writes the stale ch
 		view.handleInput(WAV_FIXTURE);
 		renderVisibleSoundField(view);
 		view.handleInput("\r");
-		await tick();
+		// Disposing before the validation even starts would never observe the
+		// stale-choice guard, so wait until the deferred validation is pending.
+		await settleUntil(() => validationStarted, "the in-flight validation to start");
 		assert.equal(typeof resolveValidation, "function", "validation must be in flight before disposing the card");
 		const before = structuredClone(getNotificationService()!.getState().settings);
 		view.dispose();
