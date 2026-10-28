@@ -603,6 +603,38 @@ test("home with no args prints the default isolated home", (t) => {
 	assert.equal(result.stdout.trim(), `isolated ${f.gentleShellHome}`);
 });
 
+test("home after repeated selectors reports the selected path without Pi or config writes", (t) => {
+	for (const configured of [false, true]) {
+		const f = fixture(t);
+		const target = join(f.root, "agent home");
+		const wrapperHome = join(f.root, "wrapper-home");
+		const configPath = join(f.home, ".gentle-shell", "config.json");
+		const original = '{"home":"link","keep":"unchanged"}\n';
+		if (configured) {
+			mkdirSync(dirname(configPath), { recursive: true });
+			writeFileSync(configPath, original, { mode: 0o600 });
+		}
+		const calls = join(f.root, "pi-invocations.jsonl");
+		writeFileSync(f.piScript, [
+			"#!/usr/bin/env node",
+			"import { appendFileSync } from 'node:fs';",
+			`appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + '\\n');`,
+			"if (process.argv.includes('--version')) { console.log('1.2.0'); process.exit(0); }",
+			"process.stderr.write('unexpected Pi invocation\\n'); process.exit(91);",
+		].join("\n"));
+		const result = run({ ...f.env, GENTLE_SHELL_SKIP_STARTUP_UPDATE: "1" },
+			["--home", wrapperHome, "--home", target, "home"]);
+		assert.equal(result.status, 0, result.stderr);
+		assert.equal(result.stdout, `path ${target}\n`);
+		assert.equal(result.stderr, "");
+		assert.equal(existsSync(calls), false, "an informational home query must not probe or launch Pi");
+		assert.equal(existsSync(target), false);
+		assert.equal(existsSync(wrapperHome), false);
+		assert.equal(existsSync(configPath), configured);
+		if (configured) assert.equal(readFileSync(configPath, "utf8"), original);
+	}
+});
+
 test("home link persists and a later home reflects it", (t) => {
 	const f = fixture(t);
 	const save = run(f.env, ["home", "link"]);

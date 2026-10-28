@@ -361,7 +361,7 @@ persona files.
 
 ### `home` subcommand and `~/.gentle-shell/config.json`
 
-`gentle-shell home` alone prints the effective mode and directory (`<mode> <dir>`) without persisting anything. `gentle-shell home link`, `gentle-shell home isolated`, or `gentle-shell home <path>` persists that choice to `~/.gentle-shell/config.json` as `{"home": "link" | "isolated" | "<path>"}`, so a later plain `gentle-shell` picks it up; a flag on a given invocation still overrides the persisted config without rewriting it.
+`gentle-shell home` alone prints the effective mode and directory (`<mode> <dir>`) without persisting anything. Leading selectors apply to this query: `gentle-shell --home "/path/agent home" home` prints `path /path/agent home` without creating the home, changing config or starting Pi. Repeated `--home` options use the last path, including a wrapper's default followed by an explicit user path. Use `--` before a literal `home` prompt to forward it to Pi instead. `gentle-shell home link`, `gentle-shell home isolated`, or `gentle-shell home <path>` persists that choice to `~/.gentle-shell/config.json` as `{"home": "link" | "isolated" | "<path>"}`, so a later plain `gentle-shell` picks it up; a flag on a given invocation still overrides the persisted config without rewriting it.
 
 `gentle-shell [--isolated | --home <path>] home import-pi [--dry-run]` copies your pi sign-ins into a separate home instead of sharing them with `--link`. The source is your own pi home, resolved like `--link` (`GENTLE_SHELL_USER_PI_HOME`, then `PI_CODING_AGENT_DIR`, then `~/.pi/agent`); the target is the resolved home (a flag, then the persisted choice, then the isolated default). It copies only:
 

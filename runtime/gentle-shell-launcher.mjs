@@ -38,9 +38,9 @@ function isPiSubcommand(token        )                        {
 
 
 
-// Home-, upgrade- and self-uninstall-subcommand parsing is deliberately shallow:
-// each only counts as the subcommand when it is argv[0], and everything after it is handed over
-// untouched as commandArgs — T2 owns interpreting `home link|isolated|<path>`.
+// Leading administrative commands capture their remaining arguments untouched.
+// Home queries/imports also accept selectors; upgrade, self-uninstall and
+// memory retain their argv[0]-only dispatch. The bin interprets home arguments.
 // `self-uninstall` is not `uninstall`, which stays pi's own alias for `remove`.
 export function parseLauncherArgs(argv          )                     {
 	if (argv[0] === "home" || argv[0] === "upgrade" || argv[0] === "self-uninstall" || argv[0] === "memory") {
@@ -140,23 +140,16 @@ export function parseLauncherArgs(argv          )                     {
 			i += 1;
 			continue;
 		}
-		// Unlike `home`, `setup` is not restricted to argv[0]: it accepts the
-		// home selectors (--link, --isolated, --home <dir>) ahead of it, same
-		// as a pi subcommand would, so it provisions whichever home those
-		// selectors resolve to. It is only recognised as the FIRST non-flag
-		// token — once a pi subcommand (or any other passthrough token) has
-		// already started, a later "setup" is just an ordinary passthrough
-		// argument, same as "home" is.
-		if (arg === "setup" && command === undefined && passthrough.length === 0) {
-			command = "setup";
-			commandArgs = argv.slice(i + 1);
-			break;
-		}
-		// `home import-pi` likewise takes the home selectors ahead of it, so it
-		// imports into the home they resolve to; any other `home` after a
-		// selector stays pi's.
-		if (arg === "home" && argv[i + 1] === "import-pi" && command === undefined && passthrough.length === 0) {
-			command = "home";
+		// Home queries and import-pi apply leading selectors, like setup.
+		// Preserve other home argument sequences as Pi passthrough. Only the
+		// first non-flag token is eligible; --escaped words also stay Pi's.
+		// Earlier help/version flags retain their existing precedence.
+		if (
+			(arg === "setup" || (arg === "home" && !help && !version &&
+				(i === argv.length - 1 || argv[i + 1] === "import-pi"))) &&
+			command === undefined && passthrough.length === 0
+		) {
+			command = arg;
 			commandArgs = argv.slice(i + 1);
 			break;
 		}
@@ -1290,6 +1283,7 @@ export function helpText()         {
 	return [
 		"Usage: gentle-shell [options] [-- pi-args...]",
 		"       gentle-shell home [link|isolated|<path>]",
+		"       gentle-shell [home selectors] home",
 		"       gentle-shell [home selectors] home import-pi [--dry-run]",
 		"       gentle-shell [home selectors] setup [--dry-run]",
 		"       gentle-shell upgrade [--channel release|main]",
@@ -1312,6 +1306,7 @@ export function helpText()         {
 		"",
 		"Commands:",
 		"  home             Print or persist the effective home mode (link, isolated, or a path).",
+		"                   Leading home selectors apply to the query; it never starts Pi or persists them.",
 		"  home import-pi   Copy your pi sign-ins (auth.json) and MCP servers (mcp.json) into the",
 		"                   resolved separate home, plus your default provider, model and thinking",
 		"                   level when it has none. Never overwrites a file or setting, never copies",

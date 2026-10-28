@@ -629,9 +629,10 @@ function loadConfig() {
 	return text === undefined ? undefined : parseLauncherConfig(text);
 }
 
-function handleHomeCommand(commandArgs) {
+function handleHomeCommand(args) {
+	const { commandArgs } = args;
 	if (commandArgs.length === 0) {
-		const resolved = resolveHome({ args: emptyArgs(), env: process.env, homedir: homedir(), config: loadConfig() });
+		const resolved = resolveHome({ args, env: process.env, homedir: homedir(), config: loadConfig() });
 		process.stdout.write(`${resolved.mode} ${resolved.dir}\n`);
 		process.exit(0);
 	}
@@ -1891,7 +1892,7 @@ async function main() {
 	}
 	if (args.command === "home") {
 		if (args.commandArgs[0] === "import-pi") await handleImportPiCommand(args);
-		else handleHomeCommand(args.commandArgs);
+		else handleHomeCommand(args);
 		return;
 	}
 	// The verification input applies to `--version` only (scripts/bundled-install.mjs upgradeBundled).

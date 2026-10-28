@@ -216,13 +216,52 @@ test("help text documents the bundled upgrade, its rollback and the pinned Pi up
 	assert.match(text, /In a bundled install Pi ships pinned: 'update' without a package\n\s+runs 'gentle-shell upgrade'/);
 });
 
-test("parseLauncherArgs treats home as a plain passthrough token when it is not argv[0]", () => {
+test("parseLauncherArgs recognises home after selectors without consuming escaped prompts", () => {
 	const parsed = parseLauncherArgs(["--isolated", "home"]);
-	assert.equal(parsed.command, undefined);
-	assert.deepEqual(parsed.passthrough, ["home"]);
+	assert.equal(parsed.command, "home");
+	assert.equal(parsed.isolated, true);
+	assert.deepEqual(parsed.commandArgs, []);
+	assert.deepEqual(parsed.passthrough, []);
+	const path = parseLauncherArgs(["--home", "/wrapper", "--home", "/agent home", "home"]);
+	assert.equal(path.command, "home");
+	assert.equal(path.home, "/agent home");
+	assert.deepEqual(path.passthrough, []);
+	const escaped = parseLauncherArgs(["--home", "/agent home", "--", "home"]);
+	assert.equal(escaped.command, undefined);
+	assert.deepEqual(escaped.passthrough, ["home"]);
 });
 
-test("parseLauncherArgs accepts home selectors ahead of home import-pi only", () => {
+test("parseLauncherArgs preserves version before trailing home", () => {
+	for (const prefix of [[], ["--home", "/agent home"]]) {
+		for (const suffix of [[], ["import-pi", "--dry-run"]]) {
+			const parsed = parseLauncherArgs([...prefix, "--version", "home", ...suffix]);
+			assert.equal(parsed.version, true);
+			assert.equal(parsed.help, false);
+			assert.equal(parsed.command, undefined);
+			assert.deepEqual(parsed.commandArgs, []);
+			assert.deepEqual(parsed.passthrough, ["home", ...suffix]);
+			assert.equal(parsed.home, prefix.length ? "/agent home" : undefined);
+		}
+	}
+});
+
+test("parseLauncherArgs preserves help before trailing home", () => {
+	for (const flag of ["--help", "-h"]) {
+		for (const prefix of [[], ["--home", "/agent home"]]) {
+			for (const suffix of [[], ["import-pi", "--dry-run"]]) {
+				const parsed = parseLauncherArgs([...prefix, flag, "home", ...suffix]);
+				assert.equal(parsed.help, true);
+				assert.equal(parsed.version, false);
+				assert.equal(parsed.command, undefined);
+				assert.deepEqual(parsed.commandArgs, []);
+				assert.deepEqual(parsed.passthrough, ["home", ...suffix]);
+				assert.equal(parsed.home, prefix.length ? "/agent home" : undefined);
+			}
+		}
+	}
+});
+
+test("parseLauncherArgs preserves import-pi and non-query passthrough after selectors", () => {
 	const link = parseLauncherArgs(["--link", "home", "import-pi"]);
 	assert.equal(link.link, true);
 	assert.equal(link.command, "home");
@@ -235,9 +274,30 @@ test("parseLauncherArgs accepts home selectors ahead of home import-pi only", ()
 	const first = parseLauncherArgs(["home", "import-pi", "--dry-run"]);
 	assert.equal(first.command, "home");
 	assert.deepEqual(first.commandArgs, ["import-pi", "--dry-run"]);
-	// Anything else after a selector stays pi's, as before.
-	assert.deepEqual(parseLauncherArgs(["--link", "home", "link"]).passthrough, ["home", "link"]);
+	const persist = parseLauncherArgs(["--link", "home", "link"]);
+	assert.equal(persist.command, undefined);
+	assert.equal(persist.link, true);
+	assert.deepEqual(persist.commandArgs, []);
+	assert.deepEqual(persist.passthrough, ["home", "link"]);
 	assert.deepEqual(parseLauncherArgs(["-p", "home", "import-pi"]).passthrough, ["-p", "home", "import-pi"]);
+});
+
+test("home dispatch preserves earlier Pi and launcher commands", () => {
+	for (const subcommand of PI_SUBCOMMANDS) {
+		const parsed = parseLauncherArgs(["--home", "/agent home", subcommand, "home"]);
+		assert.equal(parsed.command, undefined);
+		assert.equal(parsed.piSubcommand, subcommand);
+		assert.equal(parsed.home, "/agent home");
+		assert.deepEqual(parsed.passthrough, [subcommand, "home"]);
+	}
+	for (const command of ["setup", "upgrade", "self-uninstall", "memory"] as const) {
+		const parsed = parseLauncherArgs([command, "home"]);
+		assert.equal(parsed.command, command);
+		assert.deepEqual(parsed.commandArgs, ["home"]);
+		assert.deepEqual(parsed.passthrough, []);
+	}
+	assert.match(helpText(), /gentle-shell \[home selectors\] home\n/);
+	assert.match(helpText(), /query; it never starts Pi or persists them/);
 });
 
 test("help text documents gentle-shell home import-pi", () => {
@@ -258,10 +318,8 @@ test("separateHomeHint mentions home import-pi only when the user's pi home has 
 
 // --- setup subcommand ----------------------------------------------------
 //
-// Unlike `home`, `setup` is not restricted to argv[0]: it accepts the home
-// selectors (--link, --isolated, --home <dir>) ahead of it, same as any pi
-// subcommand would, since setup provisions whichever home those selectors
-// resolve to.
+// Like `home`, `setup` accepts home selectors (--link, --isolated,
+// --home <dir>) ahead of it, since setup provisions the selected home.
 
 test("parseLauncherArgs recognises setup as argv[0] and captures the rest as commandArgs", () => {
 	const parsed = parseLauncherArgs(["setup"]);
