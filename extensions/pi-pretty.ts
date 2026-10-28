@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { nativeAdmissionSdk } from "../lib/bash-preexec-admission.ts";
 import {
 	createBashToolDefinition,
@@ -83,13 +84,25 @@ export default async function gentlePiPrettyExtension(
 		const key = sdk.createBashToolDefinition ? "createBashToolDefinition" : "createBashTool";
 		const factory = sdk[key];
 		if (factory === nativeAdmissionSdk.createBashToolDefinition || factory === nativeAdmissionSdk.createBashTool) {
+			const invocation = new AsyncLocalStorage<{ context: unknown; active: boolean }>();
 			let delegate: { execute: object } | undefined;
 			let capturedExecute: object | undefined;
+			let facadeIntact: (() => boolean) | undefined;
 			const strictFactory = function(this: unknown, cwd: string, options?: Record<string, unknown>) {
 				const tool = Reflect.apply(factory as (...args: unknown[]) => { execute: object }, this, [cwd, { ...options, requireAdmission: true }]);
 				delegate = tool;
 				capturedExecute = tool.execute;
-				return tool;
+				const exactExecute = tool.execute;
+				// Only the pinned plugin gets this facade. Keep the original SDK tool
+				// and receiver intact; an explicit sixth argument always wins.
+				const facade = { ...tool, execute: function(...args: unknown[]) {
+					const scope = invocation.getStore();
+					if (args.length < 6 && scope?.active) args = [...args, scope.context];
+					return Reflect.apply(exactExecute as (...args: unknown[]) => unknown, tool, args);
+				} };
+				const forward = facade.execute;
+				facadeIntact = () => facade.execute === forward;
+				return facade;
 			};
 			deps = { ...supplied, sdk: new Proxy(sdk, { get: (target, property, receiver) => property === key ? strictFactory : Reflect.get(target, property, receiver) }) };
 			const api = pi as ExtensionAPI;
@@ -100,8 +113,17 @@ export default async function gentlePiPrettyExtension(
 					if (tool.name === "bash" && delegate && capturedExecute) {
 						const exactDelegate = delegate;
 						const exactExecute = capturedExecute;
-						const wrapper = tool.execute;
-						nativeAdmissionSdk.bindToolExecutionContext!(wrapper, exactExecute, () => exactDelegate.execute === exactExecute && tool.execute === wrapper);
+						const intact = facadeIntact!;
+						const pluginExecute = tool.execute;
+						const wrapper: typeof tool.execute = function(this: unknown, ...args) {
+							const scope = { context: args[5], active: args.length >= 6 };
+							return invocation.run(scope, async () => {
+								try { return await Reflect.apply(pluginExecute, this, args); }
+								finally { scope.active = false; }
+							});
+						};
+						tool.execute = wrapper;
+						nativeAdmissionSdk.bindToolExecutionContext!(wrapper, exactExecute, () => exactDelegate.execute === exactExecute && intact() && tool.execute === wrapper);
 						delegate = undefined;
 					}
 					return api.registerTool.call(api, tool);

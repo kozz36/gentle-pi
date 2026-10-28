@@ -13,8 +13,9 @@ const { default: pretty } = await import("../extensions/pi-pretty.ts");
 const artifacts = resolve(tmpdir(), "gp-preexec-integration");
 mkdirSync(artifacts, { recursive: true, mode: 0o700 });
 
-for (const mode of ["approved", "denied", "headless", "error", "cancelled", "policy-changed", "replaced", "delegate-changed", "backend-opaque", "hard-denied", "child-denied", "safe", "safe-headless", "pretty", "opaque-pretty"] as const) {
-test(`GP final native invocation: ${mode}`, async () => {
+for (const scenario of ["approved", "denied", "headless", "error", "cancelled", "policy-changed", "replaced", "delegate-changed", "backend-opaque", "hard-denied", "child-denied", "safe", "safe-headless", "pretty", "opaque-pretty", "pretty-denied", "pretty-headless", "pretty-error", "pretty-cancelled", "pretty-replaced"] as const) {
+test(`GP final native invocation: ${scenario}`, async () => {
+	const mode = scenario.startsWith("pretty-") ? scenario.slice(7) : scenario;
 	const cwd = mkdtempSync(join(artifacts, "session-"));
 	const finalCwd = join(cwd, "final");
 	const agentDir = join(cwd, "agent");
@@ -30,7 +31,7 @@ test(`GP final native invocation: ${mode}`, async () => {
 		spawnHook: (context: { command: string; cwd: string }) => ({ ...context, command: finalCommand, cwd: finalCwd }) });
 	let replace!: () => void;
 	let opaqueCalls = 0;
-	const usePretty = mode === "pretty" || mode === "opaque-pretty";
+	const usePretty = scenario.startsWith("pretty") || mode === "opaque-pretty";
 	const realSpawn = childProcess.spawn;
 	let starts = 0;
 	childProcess.spawn = ((...args: Parameters<typeof realSpawn>) => {
@@ -41,14 +42,14 @@ test(`GP final native invocation: ${mode}`, async () => {
 	}) as typeof realSpawn;
 	syncBuiltinESMExports();
 	const { session, faux } = await createNativeSession({ cwd, agentDir,
-		extensionFactories: [createGentleAiExtension({ nativeReviewCli: null, processEnv: { ...process.env, GENTLE_PI_AGENTS_CHILD: mode === "child-denied" ? "1" : "0" } }),
+		extensionFactories: [createGentleAiExtension({ nativeReviewCli: null, resolveTelemetryTriggerBinary: () => { throw new Error("Telemetry disabled in native fixture"); }, processEnv: { ...process.env, GENTLE_PI_AGENTS_CHILD: mode === "child-denied" ? "1" : "0" } }),
 			async (pi: Parameters<ReturnType<typeof createGentleAiExtension>>[0]) => {
 				replace = () => pi.registerTool({ ...definition });
 				if (!usePretty) { pi.registerTool(definition); return; }
 				process.env.GENTLE_PI_QUIET_TOOLS = "0";
 				process.env.PRETTY_DISABLE_TOOLS = "read,ls,find,grep";
 				const deps = { sdk, fffModule: { FileFinder: { create: () => ({ ok: false, error: "Test indexing disabled" }) } } };
-				if (mode === "pretty") {
+				if (mode !== "opaque-pretty") {
 					await pretty(pi, deps);
 				} else {
 					// Observing a genuine dummy factory call is not forwarding provenance.
@@ -116,7 +117,8 @@ test(`GP final native invocation: ${mode}`, async () => {
 });
 }
 
-test("GP concurrent final approvals and reused call IDs never borrow a decision", async () => {
+for (const usePretty of [false, true]) {
+test(`GP concurrent final approvals and reused call IDs never borrow a decision${usePretty ? " through pretty" : ""}`, async () => {
 	const cwd = mkdtempSync(join(artifacts, "concurrent-"));
 	const agentDir = join(cwd, "agent");
 	mkdirSync(agentDir);
@@ -136,7 +138,12 @@ test("GP concurrent final approvals and reused call IDs never borrow a decision"
 		},
 	});
 	const resourceLoader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
-		extensionFactories: [createGentleAiExtension({ nativeReviewCli: null }), (pi: Parameters<ReturnType<typeof createGentleAiExtension>>[0]) => pi.registerTool(definition)] });
+		extensionFactories: [createGentleAiExtension({ nativeReviewCli: null, resolveTelemetryTriggerBinary: () => { throw new Error("Telemetry disabled in native fixture"); } }), async (pi: Parameters<ReturnType<typeof createGentleAiExtension>>[0]) => {
+			if (!usePretty) { pi.registerTool(definition); return; }
+			process.env.GENTLE_PI_QUIET_TOOLS = "0";
+			process.env.PRETTY_DISABLE_TOOLS = "read,ls,find,grep";
+			await pretty(pi, { sdk, fffModule: { FileFinder: { create: () => ({ ok: false, error: "Test indexing disabled" }) } } });
+		}] });
 	await resourceLoader.reload();
 	const { session } = await sdk.createAgentSession({ cwd, agentDir, modelRuntime, model: faux.getModel(), thinkingLevel: "off", tools: ["bash"], settingsManager, sessionManager: sdk.SessionManager.inMemory(cwd), resourceLoader });
 	const confirmations = new Map<string, (approved: boolean) => void>();
@@ -144,14 +151,16 @@ test("GP concurrent final approvals and reused call IDs never borrow a decision"
 	const ui = new Proxy({ confirm: async (_title: string, body: string) => {
 		const label = [...plans].find(([, command]) => body.includes(command))?.[0];
 		assert.ok(label, "confirmation must match an actual prepared command");
-		assert.ok(body.includes(cwd) && body.includes("2000") && body.includes("/bin/sh"));
+		assert.ok(body.includes(cwd) && body.includes("2000"));
+		if (!usePretty) assert.ok(body.includes("/bin/sh"));
 		return new Promise<boolean>(resolve => { confirmations.set(label, resolve); changed(); });
 	} }, { get: (target, key) => Reflect.get(target, key) ?? (() => {}) });
 	await session.bindExtensions({ mode: "rpc", uiContext: ui });
 	const starts: { command: string; cwd: string }[] = [];
 	const realSpawn = childProcess.spawn;
 	childProcess.spawn = ((...args: Parameters<typeof realSpawn>) => {
-		assert.equal(args[0], "/bin/sh");
+		if (usePretty) assert.match(String(args[0]), /\/bash$/);
+		else assert.equal(args[0], "/bin/sh");
 		assert.deepEqual((args[1] as string[]).slice(0, 1), ["-c"]);
 		starts.push({ command: (args[1] as string[])[1], cwd: (args[2] as { cwd: string }).cwd });
 		return Reflect.apply(realSpawn, childProcess, args);
@@ -169,7 +178,8 @@ test("GP concurrent final approvals and reused call IDs never borrow a decision"
 		}
 	};
 	const turn = (labels: string[]) => {
-		faux.setResponses([fauxAssistantMessage(labels.map(label => fauxToolCall("bash", { command: `printf ${label}`, timeout: 2 }, { id: "reused-call-id" })), { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+		for (const label of labels) plans.set(label, `npm() { printf ${label}; }; npm publish; printf x >> effect-${label}`);
+		faux.setResponses([fauxAssistantMessage(labels.map(label => fauxToolCall("bash", { command: usePretty ? plans.get(label)! : `printf ${label}`, timeout: 2 }, { id: "reused-call-id" })), { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
 		return session.prompt("Run only the harmless owned counters.");
 	};
 	try {
@@ -212,6 +222,88 @@ test("GP concurrent final approvals and reused call IDs never borrow a decision"
 	}
 });
 
+}
+
+test("pretty rejects an explicit context from another live SDK invocation", async () => {
+	const cwd = mkdtempSync(join(artifacts, "conflicting-context-"));
+	const previousQuiet = process.env.GENTLE_PI_QUIET_TOOLS;
+	const previousDisabled = process.env.PRETTY_DISABLE_TOOLS;
+	process.env.GENTLE_PI_QUIET_TOOLS = "0";
+	process.env.PRETTY_DISABLE_TOOLS = "read,ls,find,grep";
+	let arrivals = 0;
+	let forwarded = 0;
+	let release!: () => void;
+	const paired = new Promise<void>(resolve => { release = resolve; });
+	const { session, faux } = await createNativeSession({ cwd, extensionFactories: [
+		createGentleAiExtension({ nativeReviewCli: null, resolveTelemetryTriggerBinary: () => { throw new Error("Telemetry disabled in native fixture"); } }),
+		async pi => {
+			await pretty(new Proxy(pi, { get(target, key, receiver) {
+				if (key !== "registerTool") return Reflect.get(target, key, receiver);
+				return (tool: Parameters<typeof pi.registerTool>[0]) => {
+					if (tool.name !== "bash") return target.registerTool.call(target, tool);
+					const original = tool.execute;
+					const calls = new Map<string, Parameters<typeof original>>();
+					const g: typeof original = async function(this: unknown, ...args) {
+						// Only actual SDK executor invocations supply these opaque values.
+						assert.equal(args.length, 6);
+						assert.ok(args[5]);
+						calls.set(args[0], args);
+						arrivals++;
+						if (calls.size === 2) release();
+						await paired;
+						const other = [...calls.values()].find(call => call !== args)!;
+						assert.ok(other);
+						assert.notEqual(other[5], args[5]);
+						const conflicting: Parameters<typeof original> = [...args];
+						conflicting[5] = other[5];
+						forwarded++;
+						return Reflect.apply(original, this, conflicting);
+					};
+					const registered = { ...tool, execute: g };
+					sdk.bindToolExecutionContext(g, original, () => tool.execute === original && registered.execute === g);
+					return target.registerTool.call(target, registered);
+				};
+			} }), { sdk, fffModule: { FileFinder: { create: () => ({ ok: false, error: "Test indexing disabled" }) } } });
+		},
+	] });
+	let confirms = 0;
+	let starts = 0;
+	const outcomes: { isError: boolean; result: { content: { type: string; text?: string }[] } }[] = [];
+	session.subscribe((event: { type: string }) => { if (event.type === "tool_execution_end") outcomes.push(event as unknown as typeof outcomes[number]); });
+	const ui = new Proxy({ confirm: async () => { confirms++; return false; } }, { get: (target, key) => Reflect.get(target, key) ?? (() => {}) });
+	const realSpawn = childProcess.spawn;
+	try {
+		await session.bindExtensions({ mode: "rpc", uiContext: ui });
+		childProcess.spawn = () => {
+			starts++;
+			throw new Error("Conflicting contexts must never reach process creation");
+		};
+		syncBuiltinESMExports();
+		faux.setResponses([fauxAssistantMessage(["one", "two"].map(label => fauxToolCall("bash", {
+			command: `npm() { printf ${label}; }; npm publish; printf x >> effect-${label}`, timeout: 2,
+		}, { id: `conflicting-${label}` })), { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+		await session.prompt("Exercise only the owned conflicting-context negative fixtures.");
+		assert.equal(arrivals, 2, "both genuine SDK invocations reached the bound forwarder");
+		assert.equal(forwarded, 2, "both explicit conflicting contexts reached the unchanged pretty outer");
+		assert.equal(confirms, 0);
+		assert.equal(starts, 0);
+		assert.equal(outcomes.length, 2);
+		for (const outcome of outcomes) {
+			assert.equal(outcome.isError, true);
+			assert.match(outcome.result.content.map(block => block.text ?? "").join("\n"), /mismatched native execution context/);
+		}
+		for (const label of ["one", "two"]) assert.equal(existsSync(join(cwd, `effect-${label}`)), false);
+	} finally {
+		session.dispose();
+		childProcess.spawn = realSpawn;
+		syncBuiltinESMExports();
+		if (previousQuiet === undefined) delete process.env.GENTLE_PI_QUIET_TOOLS;
+		else process.env.GENTLE_PI_QUIET_TOOLS = previousQuiet;
+		if (previousDisabled === undefined) delete process.env.PRETTY_DISABLE_TOOLS;
+		else process.env.PRETTY_DISABLE_TOOLS = previousDisabled;
+	}
+});
+
 // Keep the unsupported target profile visible as a behavioral RED until its
 // actual SDK-owned constructor can opt in without replacing the selected tool.
 test("default quiet profile admits the original configured native Bash owner", async (t) => {
@@ -229,7 +321,7 @@ test("default quiet profile admits the original configured native Bash owner", a
 		`import quietTools from ${source("../extensions/quiet-tools.ts")};`,
 		`import pretty from ${source("../extensions/pi-pretty.ts")};`,
 		"export default async function(pi) {",
-		"  createGentleAiExtension({ nativeReviewCli: null })(pi);",
+		"  createGentleAiExtension({ nativeReviewCli: null, resolveTelemetryTriggerBinary: () => { throw new Error('Telemetry disabled in native fixture'); } })(pi);",
 		"  quietTools(pi, () => undefined);",
 		"  await pretty(pi, { fffModule: { FileFinder: { create: () => ({ ok: false, error: 'Test indexing disabled' }) } } });",
 		"}",
