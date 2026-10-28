@@ -1,4 +1,4 @@
-import { createNativeSession, sdk, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
+import { observeNativeAdmissions, type AdmissionObservation, createNativeSession, sdk, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
@@ -15,9 +15,10 @@ async function harness(t:test.TestContext) {
  const previous=process.env.GENTLE_PI_CONFIG_HOME;process.env.GENTLE_PI_CONFIG_HOME=home;
  t.after(()=>{if(previous===undefined)delete process.env.GENTLE_PI_CONFIG_HOME;else process.env.GENTLE_PI_CONFIG_HOME=previous;});
  const commands=new Map<string,any>(),requests:any[]=[],records:any[]=[],callbacks:string[]=[],observations:any[]=[];
+ const admissions:AdmissionObservation[]=[];
  let confirmations=0,decision="allow",ctx:any;
  const native=await createNativeSession({cwd:home,tools:["*"],extensionFactories:[pi=>{
-  const observed=new Proxy(pi,{get(target,key){
+  const observed=new Proxy(observeNativeAdmissions(pi,admissions),{get(target,key){
    if(key==="registerCommand")return (name:string,value:any)=>{commands.set(name,value);return target.registerCommand(name,value);};
    if(key==="appendEntry")return (type:string,data:any)=>{target.appendEntry(type,data);if(type==="gentle-auto-permission")records.push([type,data]);};
    return Reflect.get(target,key);
@@ -39,9 +40,10 @@ async function harness(t:test.TestContext) {
   enable:async()=>{assert.ok(commands.get("gentle:mode"));await commands.get("gentle:mode").handler("auto",ctx);},
   input:async(text:string)=>{await native.session.extensionRunner.emitInput(text,undefined,"interactive");native.session.sessionManager.appendMessage({role:"user",content:text,timestamp:1});},
   call:async(toolName:string,input:any)=>{
-   const outcomes:any[]=[],attempts:Parameters<typeof childProcess.spawn>[]=[];let nativeCallbacks=0;
+   const outcomes:any[]=[],attempts:Parameters<typeof childProcess.spawn>[]=[];
+   const admissionStart=admissions.length;let legacyProgress=0;
    const unsubscribe=native.session.subscribe((event:any)=>{
-    if(event.type==="tool_execution_update"&&event.partialResult.content.length===0)nativeCallbacks++;
+    if(event.type==="tool_execution_update"&&event.partialResult.content.length===0)legacyProgress++;
     if(event.type==="tool_execution_end")outcomes.push(event);
    });
    const originalSpawn=childProcess.spawn,stopped=new FixtureStop("FixtureStop: Auto fixture categorically stopped OS process creation");
@@ -52,7 +54,11 @@ async function harness(t:test.TestContext) {
    finally{unsubscribe();childProcess.spawn=originalSpawn;syncBuiltinESMExports();}
    assert.equal(outcomes.length,1);assert.equal(readFileSync(sentinel,"utf8"),"unchanged");
    const outcome=outcomes[0],reason=outcome.result.content.filter((block:any)=>block.type==="text").map((block:any)=>block.text).join("\n");
-   observations.push({toolName,nativeCallbacks,attempts:attempts.length,outcome});
+   const visits=admissions.slice(admissionStart);
+   const nativeCallbacks=visits.filter(entry=>entry.method==="evaluate").length;
+   assert.equal(legacyProgress,0,"native dispatch suppresses the legacy empty progress update");
+   assert.ok(visits.filter(entry=>entry.method==="isValid").every(entry=>entry.result===true));
+   observations.push({toolName,nativeCallbacks,attempts:attempts.length,outcome,admissions:visits});
    if(attempts.length){
     assert.equal(attempts.length,1);assert.equal(nativeCallbacks,1);assert.equal(outcome.isError,true);assert.equal(reason,stopped.message);
     assert.equal((attempts[0][1] as string[]).at(-1),input.command);assert.equal((attempts[0][2] as {cwd:string}).cwd,home);
@@ -67,6 +73,16 @@ async function harness(t:test.TestContext) {
    return outcome.isError?{block:true,reason}:undefined;
   }};
 }
+
+test("public legacy Bash execute retains its empty progress notification",async t=>{
+ const cwd=mkdtempSync(join(tmpdir(),"legacy-progress-"));
+ t.after(()=>rmSync(cwd,{recursive:true,force:true}));
+ const updates:any[]=[];
+ const tool=sdk.createBashTool(cwd,{shellPath:"/bin/sh",exposeSessionEnvironment:false});
+ const result=await tool.execute("legacy-control",{command:"printf legacy-control"},undefined,(update:any)=>updates.push(update));
+ assert.equal(updates.filter(update=>update.content.length===0).length,1);
+ assert.equal(result.content.filter((block:any)=>block.type==="text").map((block:any)=>block.text).join(""),"legacy-control");
+});
 
 test("production hook Auto reviews eligible default confirmations and all tool families without per-call questions",async t=>{
  const h=await harness(t);await h.enable();await h.input("Implement my change, run tests, and push this branch.");

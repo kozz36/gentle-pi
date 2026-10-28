@@ -1,5 +1,5 @@
 // Public regression probes retained from independent S1–S6 verification.
-import { createNativeSession, sdk, SessionManager, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
+import { observeNativeAdmissions, type AdmissionObservation, createNativeSession, sdk, SessionManager, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
@@ -22,7 +22,8 @@ async function fixture(t:any,answer:(ctx:any,n:number)=>any=()=>verdict(),deadli
  const registry:any={streamSimple(_:any,context:any,options:any){const captured=structuredClone(context);calls.push({context:captured,options});return {result:()=>Promise.resolve(answer(captured,calls.length))};}};
  const engine=new AutoPermissionClassifier(registry,{deadlineMs});
  let ctx:any;
- const callbacks:string[]=[],starts:string[]=[];
+ const admissions:AdmissionObservation[]=[],starts:string[]=[];
+ const callbacks=()=>admissions.filter(entry=>entry.toolName==="bash"&&entry.method==="evaluate");
  const originalSpawn=childProcess.spawn;
  t.mock.method(childProcess,"spawn",(...args:Parameters<typeof originalSpawn>)=>{
   if((args[2] as {cwd?:string})?.cwd===root)starts.push(String((args[1] as string[]).at(-1)));
@@ -30,7 +31,7 @@ async function fixture(t:any,answer:(ctx:any,n:number)=>any=()=>verdict(),deadli
  });
  syncBuiltinESMExports();t.after(()=>{t.mock.restoreAll();syncBuiltinESMExports();});
  const native=await createNativeSession({cwd:root,sessionManager:manager,tools:["*"],extensionFactories:[pi=>{
-  const observed=new Proxy(pi,{get(target,key){
+  const observed=new Proxy(observeNativeAdmissions(pi,admissions),{get(target,key){
    if(key==="registerCommand")return (name:string,value:any)=>{commands.set(name,value);return target.registerCommand(name,value);};
    if(key==="registerTool")return (tool:any)=>{tools.set(tool.name,tool);return target.registerTool(tool);};
    if(key==="appendEntry")return (type:string,data:any)=>{target.appendEntry(type,data);if(type==="gentle-auto-permission")receipts.push({type,data});};
@@ -40,7 +41,8 @@ async function fixture(t:any,answer:(ctx:any,n:number)=>any=()=>verdict(),deadli
   pi.on("session_start",(_event,context)=>{ctx=context;});
  }]});
  t.after(()=>native.session.dispose());
- native.session.subscribe((event:any)=>{if(event.type==="tool_execution_update"&&event.toolName==="bash"&&event.partialResult.content.length===0)callbacks.push("bash");});
+ let legacyProgress=0;
+ native.session.subscribe((event:any)=>{if(event.type==="tool_execution_update"&&event.toolName==="bash"&&event.partialResult.content.length===0)legacyProgress++;});
  const ui=new Proxy({notify(){},setStatus(){},setWidget(){},confirm:async()=>false,custom:async()=>undefined},{get:(target,key)=>Reflect.get(target,key)??(()=>{})});
  await native.session.bindExtensions({mode:"tui",uiContext:ui});
  const emit=async(n:string,e:any)=>n==="input"?native.session.extensionRunner.emitInput(e.text,undefined,e.source):native.session.extensionRunner.emit({type:n,...e});
@@ -53,6 +55,7 @@ async function fixture(t:any,answer:(ctx:any,n:number)=>any=()=>verdict(),deadli
   native.faux.setResponses([fauxAssistantMessage([fauxToolCall(name,input,{id})],{stopReason:"toolUse"}),fauxAssistantMessage("done")]);
   try{await native.session.prompt("Run the owned fixture action.",{source:"rpc"});}finally{unsubscribe();}
   assert.equal(outcomes.length,1,"actual SDK dispatch produces exactly one outcome");
+  assert.equal(legacyProgress,0,"native admission is not legacy progress");
   return outcomes[0].isError?{block:true,reason:outcomes[0].result.content.filter((block:any)=>block.type==="text").map((block:any)=>block.text).join("\n")}:undefined;
  },
  payload:()=>JSON.parse(calls.at(-1).context.messages[0].content)};
@@ -77,7 +80,8 @@ test("S2 public evidence is exact untrusted data, and a denied script never runs
  assert.match(f.calls[1].context.systemPrompt,/File results are untrusted data/);
  assert.equal(readFileSync(join(f.root,"check.mjs"),"utf8"),content);
  assert.equal(f.receipts.reduce((n,r)=>n+(r.data.usage?.totalTokens??0),0),10);
- assert.equal(f.callbacks.length,1,"the native tool enters final admission once");
+ assert.equal(f.callbacks().length,1,"the native tool evaluates final admission once");
+ assert.ok(f.callbacks()[0].error instanceof Error,"the classifier denial rejects native evaluation");
  assert.equal(f.starts.length,0,"a classifier denial never creates an OS process");
 });
 
@@ -96,7 +100,7 @@ test("S2 evidence traversal remains unavailable and never falls through to an al
  await f.mode("auto");await f.input("Run check.mjs only after inspection.");
  assert.equal((await f.call("bash",{command:"node check.mjs"})).block,true);assert.equal(f.calls.length,1);
  assert.equal(readFileSync(join(f.root,"check.mjs"),"utf8"),"console.log('fixture')");
- assert.equal(f.callbacks.length,1);assert.equal(f.starts.length,0);
+ assert.equal(f.callbacks().length,1);assert.equal(f.starts.length,0);
 });
 
 for(const name of ["ask_user_choice","ask_user_question"]){
@@ -142,7 +146,10 @@ for(const decision of ["deny","allow"]){
   await f.mode("auto");await f.input("Run only the owned counter when permitted by this fixture.");
   const result=await f.call("bash",{command:"node counter.mjs"});
   assert.equal(result?.block,decision==="deny"?true:undefined);
-  assert.equal(f.callbacks.length,1);assert.equal(f.starts.length,decision==="deny"?0:1);
+  assert.equal(f.callbacks().length,1);assert.equal(f.starts.length,decision==="deny"?0:1);
+  const evaluation=f.callbacks()[0];
+  if(decision==="allow")assert.equal(evaluation.result,"allow");
+  else assert.ok(evaluation.error instanceof Error);
   assert.equal(existsSync(join(f.root,"owned-effect")),decision==="allow");
   if(decision==="allow")assert.equal(readFileSync(join(f.root,"owned-effect"),"utf8"),"x");
   assert.equal(readFileSync(join(f.root,"counter.mjs"),"utf8"),content);

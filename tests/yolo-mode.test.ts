@@ -1,4 +1,4 @@
-import { createNativeSession, sdk, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
+import { observeNativeAdmissions, type AdmissionObservation, createNativeSession, sdk, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
 import assert from "node:assert/strict";
 import childProcess, { execFileSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
@@ -32,6 +32,7 @@ export async function harness(t: test.TestContext, overrides: NodeJS.ProcessEnv 
 	const notices: string[] = [];
 	const statuses = new Map<string, string | undefined>();
 	const widgets = new Map<string, unknown>();
+	const admissions: AdmissionObservation[] = [];
 	let confirmations = 0;
 	let questionCallbacks = 0;
 	const root = mkdtempSync(join(tmpdir(), "yolo-native-"));
@@ -41,7 +42,7 @@ export async function harness(t: test.TestContext, overrides: NodeJS.ProcessEnv 
 	writeFileSync(sentinel, "unchanged");
 	let nativeContext!: ExtensionContext;
 	const native = await createNativeSession({ cwd: root, tools: ["*"], extensionFactories: [pi => {
-		const observed = new Proxy(pi, { get(target, key) {
+		const observed = new Proxy(observeNativeAdmissions(pi, admissions), { get(target, key) {
 			if (key === "on") return (name: string, fn: (event: unknown, ctx: ExtensionContext) => unknown) => {
 				const list = handlers.get(name) ?? []; list.push(fn); handlers.set(name, list);
 				return target.on(name as never, fn as never);
@@ -83,11 +84,12 @@ export async function harness(t: test.TestContext, overrides: NodeJS.ProcessEnv 
 				let result: unknown; for (const fn of handlers.get(name) ?? []) { const next = await fn(event, ctx); if (next !== undefined) result = next; } return result;
 			}
 			const input = event as { toolName: string; input: { command?: string } };
-			let callbacks = 0;
+			const admissionStart = admissions.length;
+			let legacyProgress = 0;
 			const attempts: Parameters<typeof childProcess.spawn>[] = [];
 			const outcomes: Array<{ isError: boolean; result: { content: Array<{ type: string; text?: string }> } }> = [];
 			const unsubscribe = native.session.subscribe((entry: any) => {
-				if (entry.type === "tool_execution_update" && entry.partialResult.content.length === 0) callbacks++;
+				if (entry.type === "tool_execution_update" && entry.partialResult.content.length === 0) legacyProgress++;
 				if (entry.type === "tool_execution_end") outcomes.push(entry);
 			});
 			const originalSpawn = childProcess.spawn;
@@ -100,6 +102,10 @@ export async function harness(t: test.TestContext, overrides: NodeJS.ProcessEnv 
 			assert.equal(outcomes.length, 1); assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
 			const outcome = outcomes[0];
 			const reason = outcome.result.content.map(block => block.text ?? "").join("\n");
+			const visits = admissions.slice(admissionStart);
+			const callbacks = visits.filter(entry => entry.method === "evaluate").length;
+			assert.equal(legacyProgress, 0, "native policy evaluation is not legacy progress");
+			assert.ok(visits.filter(entry => entry.method === "isValid").every(entry => entry.result === true));
 			observations.push({ toolName: input.toolName, callbacks, attempts: attempts.length, outcome });
 			if (attempts.length) {
 				assert.equal(attempts.length, 1); assert.equal(callbacks, 1);

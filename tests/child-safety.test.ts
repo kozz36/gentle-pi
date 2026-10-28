@@ -1,4 +1,4 @@
-import { createNativeSession, sdk, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
+import { observeNativeAdmissions, type AdmissionObservation, createNativeSession, sdk, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
@@ -16,11 +16,12 @@ async function harness(t: test.TestContext, child: boolean, primary = false) {
 	const sentinel = join(root, "data", "owned-counter");
 	writeFileSync(sentinel, "unchanged");
 	const handlers: Handler[] = [];
+	const admissions: AdmissionObservation[] = [];
 	const events: Array<{ name: string; data: unknown }> = [];
 	const env = { ...process.env, GENTLE_PI_AGENTS_CHILD: child ? "1" : "0" };
 	const native = await createNativeSession({ cwd: root, tools: ["*"], extensionFactories: [pi => {
 		for (const name of ["pi-permission-system:permission-request", "herdr:blocked"]) pi.events.on(name, data => events.push({ name, data }));
-		const observed = new Proxy(pi, { get(target, key) {
+		const observed = new Proxy(observeNativeAdmissions(pi, admissions), { get(target, key) {
 			if (key === "on") return (name: string, handler: Handler) => {
 				if (name === "tool_call") handlers.push(handler);
 				return target.on(name as never, handler as never);
@@ -44,12 +45,14 @@ async function harness(t: test.TestContext, child: boolean, primary = false) {
 			} }, { get: (target, key) => Reflect.get(target, key) ?? (() => {}) });
 			native.session.extensionRunner.setUIContext(control.hasUI ? ui : undefined, "tui");
 			const outcomes: Array<{ isError: boolean; result: { content: Array<{ type: string; text?: string }> } }> = [];
-			let callbacks = 0;
-			const observation = { callbacks: 0, attempts: 0, result: undefined as unknown };
+			const admissionStart = admissions.length;
+			let admissionEnd: number | undefined;
+			let legacyProgress = 0;
+			const observation = { get callbacks() { return admissions.slice(admissionStart, admissionEnd).filter(entry => entry.method === "evaluate").length; }, attempts: 0, result: undefined as unknown };
 			observations.push(observation);
 			const attempts: Parameters<typeof childProcess.spawn>[] = [];
 			const unsubscribe = native.session.subscribe((event: any) => {
-				if (event.type === "tool_execution_update" && event.partialResult.content.length === 0) observation.callbacks = ++callbacks;
+				if (event.type === "tool_execution_update" && event.partialResult.content.length === 0) legacyProgress++;
 				if (event.type === "tool_execution_end") outcomes.push(event);
 			});
 			const originalSpawn = childProcess.spawn;
@@ -58,15 +61,19 @@ async function harness(t: test.TestContext, child: boolean, primary = false) {
 			syncBuiltinESMExports();
 			native.faux.setResponses([fauxAssistantMessage([fauxToolCall(input.toolName, input.input)], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
 			try { await native.session.agent.prompt({ role: "user", content: "Check only the owned native admission fixture.", timestamp: 1 }); }
-			finally { unsubscribe(); childProcess.spawn = originalSpawn; syncBuiltinESMExports(); }
+			finally { admissionEnd = admissions.length; unsubscribe(); childProcess.spawn = originalSpawn; syncBuiltinESMExports(); }
 			assert.equal(outcomes.length, 1);
+			assert.equal(legacyProgress, !primary && attempts.length ? 1 : 0, "standalone child safety supplies no native binding for harmless commands; primary uses native admission");
+			const callbacks = observation.callbacks;
+			const visits = admissions.slice(admissionStart);
+			assert.equal(visits.filter(entry => entry.method === "approve").length, !child && control.hasUI ? 1 : 0, "only interactive primary confirmation invokes approval; Core refuses missing UI first");
 			assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
 			const outcome = outcomes[0];
 			const reason = outcome.result.content.map(block => block.text ?? "").join("\n");
 			observation.result = outcome;
 			if (dialogError) { assert.equal(attempts.length, 0); assert.match(reason, /cancelled dialog/); throw dialogError; }
 			if (attempts.length) {
-				assert.equal(attempts.length, 1); assert.equal(callbacks, 1);
+				assert.equal(attempts.length, 1); assert.equal(callbacks, primary ? 1 : 0, "standalone child guard returns no admission policy for harmless commands");
 				assert.equal((attempts[0][1] as string[]).at(-1), input.input.command);
 				assert.equal((attempts[0][2] as { cwd: string }).cwd, root);
 				assert.equal(outcome.isError, true); assert.equal(reason, stopped);
@@ -78,7 +85,7 @@ async function harness(t: test.TestContext, child: boolean, primary = false) {
 				assert.equal(callbacks, 0);
 				assert.equal(reason, "Gentle AI child safety blocked a recognized destructive command. Return an explicit safer plan to the parent; children cannot authorize data loss.");
 			} else {
-				assert.ok(["Tool execution admission denied", "Final admission requires UI context"].includes(reason), `Unexpected SDK failure: ${reason}`);
+				assert.equal(reason, control.hasUI ? "Tool execution admission denied" : "Final admission requires UI context");
 			}
 			return { block: true, reason };
 		},
@@ -159,7 +166,13 @@ test("primary requires fresh confirmation, cancellation and missing UI block", a
 	assert.equal(prompts, 2, "approval is never cached");
 	assert.deepEqual(h.observations.map(({ callbacks, attempts }) => ({ callbacks, attempts })), [{ callbacks: 1, attempts: 1 }, { callbacks: 1, attempts: 1 }]);
 	assert.equal((await h.handlers[0](event(command), context(async () => false)) as { block: boolean }).block, true);
-	assert.equal((await h.handlers[0](event(command), context(async () => { throw new Error("no UI"); }, false)) as { block: boolean }).block, true);
+	const eventsBeforeHeadless = h.events.slice();
+	const headless = await h.handlers[0](event(command), context(async () => { throw new Error("no UI"); }, false));
+	assert.deepEqual(headless, { block: true, reason: "Final admission requires UI context" });
+	assert.deepEqual(h.events, eventsBeforeHeadless, "Core refuses before approve, so headless execution emits no waiting/denied or Herdr lifecycle events");
+	assert.equal(h.observations.at(-1)?.callbacks, 1, "headless policy is still evaluated once");
+	assert.equal(h.observations.at(-1)?.attempts, 0, "headless refusal never attempts an OS process");
+	assert.equal(readFileSync(h.sentinel, "utf8"), "unchanged");
 	await assert.rejects(async () => h.handlers[0](event(command), context(async () => { throw new Error("cancelled dialog"); })), /cancelled dialog/);
 	assert.deepEqual(h.observations.slice(2).map(({ callbacks, attempts }) => ({ callbacks, attempts })), [{ callbacks: 1, attempts: 0 }, { callbacks: 1, attempts: 0 }, { callbacks: 1, attempts: 0 }]);
 	const states = h.events.filter((entry) => entry.name === "pi-permission-system:permission-request").map((entry) => (entry.data as { state: string }).state);

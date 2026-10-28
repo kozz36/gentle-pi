@@ -1,4 +1,4 @@
-import { createNativeSession, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
+import { observeNativeAdmissions, type AdmissionObservation, createNativeSession, createGentleAiExtension, fauxAssistantMessage, fauxToolCall } from "./support/bash-preexec-fixture.ts";
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
@@ -261,13 +261,14 @@ test("child confirm-class guardrail commands ask the parent instead of running o
 	writeFileSync(sentinel, "unchanged");
 	for (const child of [true, false]) {
 		const requests: Array<{ title: string; message: string }> = [], contexts: unknown[] = [], outcomes: any[] = [];
-		let callbacks = 0;
+		const admissions: AdmissionObservation[] = [];
+		let legacyProgress = 0;
 		const native = await createNativeSession({ cwd, extensionFactories: [pi => {
 			createGentleAiExtension({
 				processEnv: { GENTLE_PI_AGENTS_CHILD: child ? "1" : "0", GENTLE_AI_TELEMETRY: "0" },
 				nativeReviewCli: null, candidateViews: null,
 				childStandingReviewPermissionClient: { requestAuthorization: async () => false, close() {} },
-			})(pi);
+			})(observeNativeAdmissions(pi, admissions));
 			pi.on("tool_call", (_event, ctx) => { contexts.push({ mode: ctx.mode, hasUI: ctx.hasUI, cwd: ctx.cwd }); });
 		}] });
 		t.after(() => native.session.dispose());
@@ -277,7 +278,7 @@ test("child confirm-class guardrail commands ask the parent instead of running o
 			confirm: async (title: string, message: string) => { requests.push({ title, message }); return false; },
 		} });
 		const unsubscribe = native.session.subscribe((event: any) => {
-			if (event.type === "tool_execution_update" && event.partialResult.content.length === 0) callbacks++;
+			if (event.type === "tool_execution_update" && event.partialResult.content.length === 0) legacyProgress++;
 			if (event.type === "tool_execution_end") outcomes.push(event);
 		});
 		const originalSpawn = childProcess.spawn, attempts: Parameters<typeof originalSpawn>[] = [];
@@ -291,7 +292,11 @@ test("child confirm-class guardrail commands ask the parent instead of running o
 		assert.deepEqual(contexts, [{ mode: "rpc", hasUI: true, cwd }]);
 		assert.equal(requests.length, 1, `${child ? "child" : "parent"}: one parent-facing request`);
 		assert.ok(requests[0].message.includes(command)); assert.ok(requests[0].message.includes(cwd));
-		assert.equal(callbacks, 1); assert.equal(attempts.length, 0, "parent decline prevents OS process creation");
+		assert.equal(legacyProgress, 0, "native dispatch does not emit legacy empty progress");
+		assert.equal(admissions.filter(entry => entry.method === "evaluate").length, 1);
+		assert.deepEqual(admissions.filter(entry => entry.method === "evaluate").map(entry => entry.result), ["confirm"]);
+		assert.deepEqual(admissions.filter(entry => entry.method === "approve").map(entry => entry.result), [false]);
+		assert.equal(attempts.length, 0, "parent decline prevents OS process creation");
 		assert.equal(outcomes.length, 1); assert.equal(outcomes[0].isError, true, "the declined confirmation blocks the command");
 		const reason = outcomes[0].result.content.map((block: any) => block.text ?? "").join("\n");
 		assert.equal(reason, "Tool execution admission denied");
