@@ -990,6 +990,17 @@ function materializeCandidateView(request: CreateCandidateViewRequest, executor:
 	const candidateCommit = committedOnly
 		? resolveCandidateBase(contributorRoot, "HEAD", process.env, executor)
 		: base;
+	if (committedOnly && intendedUntracked !== undefined && intendedUntracked.length > 0) {
+		// Require exact untracked leaves, not Git directory prefixes or tracked overlays.
+		const untracked = new Set(gitPathTokens(contributorRoot, ["ls-files", "--others", "--exclude-standard", "-z"], executor).map((path) => path.toString("hex")));
+		const committed = gitPathTokens(contributorRoot, ["ls-tree", "-r", "--name-only", "-z", candidateCommit.tree], executor).map((path) => path.toString("hex"));
+		if (intendedUntracked.some((path) => {
+			const selected = Buffer.from(path).toString("hex");
+			// Compare raw path bytes at slash (2f) boundaries, not lexical prefixes.
+			return !untracked.has(selected) || committed.some((entry) =>
+				entry === selected || entry.startsWith(`${selected}2f`) || selected.startsWith(`${entry}2f`));
+		})) throw new CandidateViewError("candidate intended-untracked selection is invalid");
+	}
 	const parent = candidateViewParent(canonicalCommonDir, platform);
 	sweepCandidateOwners(canonicalCommonDir, (args) => git(canonicalCommonDir, args, process.env, executor), makeWritableForCleanup, platform);
 	const index = mkdtempSync(join(tmpdir(), "gentle-ai-candidate-index-"));
@@ -1010,9 +1021,10 @@ function materializeCandidateView(request: CreateCandidateViewRequest, executor:
 			if (intendedUntracked === undefined) git(contributorRoot, ["add", "-A"], environment, executor);
 			else {
 				git(contributorRoot, ["add", "-u"], environment, executor);
-				if (intendedUntracked.length > 0) git(contributorRoot, ["add", "--", ...intendedUntracked], { ...environment, GIT_LITERAL_PATHSPECS: "1" }, executor);
 			}
 		}
+		// Committed ranges overlay explicit selection without refreshing tracked entries.
+		if (intendedUntracked !== undefined && intendedUntracked.length > 0) git(contributorRoot, ["add", "--", ...intendedUntracked], { ...environment, GIT_LITERAL_PATHSPECS: "1" }, executor);
 		const candidateTree = git(contributorRoot, ["write-tree"], environment, executor);
 		const root = join(parent, randomUUID());
 		let owner: CandidateViewOwner;

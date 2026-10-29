@@ -1050,6 +1050,92 @@ test("committed-only candidate views scope an explicit base to committed changes
 	}
 });
 
+test("committed-only candidate views overlay only explicitly selected untracked files on HEAD", (t) => {
+	const contributorRoot = repository(t);
+	const baseRef = git(contributorRoot, "rev-parse", "HEAD");
+	const providerBaseTree = git(contributorRoot, "rev-parse", "HEAD^{tree}");
+	writeFileSync(join(contributorRoot, "tracked.txt"), "committed change\n");
+	git(contributorRoot, "add", "tracked.txt");
+	git(contributorRoot, "-c", "user.name=Candidate Test", "-c", "user.email=candidate@example.invalid", "commit", "-m", "candidate");
+	writeFileSync(join(contributorRoot, "tracked.txt"), "staged change\n");
+	writeFileSync(join(contributorRoot, "staged.txt"), "staged addition\n");
+	git(contributorRoot, "add", "tracked.txt", "staged.txt");
+	writeFileSync(join(contributorRoot, "tracked.txt"), "unstaged change\n");
+	writeFileSync(join(contributorRoot, "selected.txt"), "selected\n");
+	writeFileSync(join(contributorRoot, "excluded.txt"), "excluded\n");
+	const before = [git(contributorRoot, "rev-parse", "HEAD"), git(contributorRoot, "diff", "--cached", "--binary"), git(contributorRoot, "status", "--porcelain=v1", "--untracked-files=all")];
+	for (const base of [{ baseRef }, { providerBaseTree }]) {
+		const view = createCandidateView({ contributorRoot, ...base, committedOnly: true, intendedUntracked: ["selected.txt"] });
+		try {
+			assert.deepEqual(view.paths, ["selected.txt", "tracked.txt"]);
+			assert.deepEqual(view.intendedUntracked, ["selected.txt"]);
+			assert.equal(view.baseTree, providerBaseTree);
+			assert.equal(readFileSync(join(view.root, "tracked.txt"), "utf8"), "committed change\n");
+			assert.equal(readFileSync(join(view.root, "selected.txt"), "utf8"), "selected\n");
+			assert.equal(git(contributorRoot, "show", `${view.candidateTree}:selected.txt`), "selected");
+			assert.equal(existsSync(join(view.root, "staged.txt")), false);
+			assert.equal(existsSync(join(view.root, "excluded.txt")), false);
+			view.verify();
+		} finally { view.cleanup(); }
+		assert.deepEqual([git(contributorRoot, "rev-parse", "HEAD"), git(contributorRoot, "diff", "--cached", "--binary"), git(contributorRoot, "status", "--porcelain=v1", "--untracked-files=all")], before);
+	}
+});
+
+for (const selection of ["tracked.txt", "mixed", "deleted-from-index"] as const) test(`committed-only selection rejects ${selection} before materialization`, (t) => {
+	const contributorRoot = repository(t);
+	const baseRef = git(contributorRoot, "rev-parse", "HEAD");
+	const providerBaseTree = git(contributorRoot, "rev-parse", "HEAD^{tree}");
+	writeFileSync(join(contributorRoot, "tracked.txt"), "unstaged tracked\n");
+	mkdirSync(join(contributorRoot, "mixed"));
+	writeFileSync(join(contributorRoot, "mixed", "unselected.txt"), "unselected\n");
+	if (selection === "deleted-from-index") git(contributorRoot, "rm", "--cached", "-f", "tracked.txt");
+	const state = () => [git(contributorRoot, "rev-parse", "HEAD"), git(contributorRoot, "diff", "--cached", "--binary"), git(contributorRoot, "status", "--porcelain=v1", "--untracked-files=all"), git(contributorRoot, "worktree", "list", "--porcelain")];
+	const before = state();
+	for (const base of [{ baseRef }, { providerBaseTree }]) {
+		let view: ReturnType<typeof createCandidateView> | undefined;
+		try {
+			assert.throws(() => { view = createCandidateView({ contributorRoot, ...base, committedOnly: true, intendedUntracked: [selection === "deleted-from-index" ? "tracked.txt" : selection] }); }, (error: unknown) => error instanceof CandidateViewError && error.message === "candidate intended-untracked selection is invalid");
+		} finally { view?.cleanup(); }
+		assert.deepEqual(state(), before);
+		assert.equal(readFileSync(join(contributorRoot, "tracked.txt"), "utf8"), "unstaged tracked\n");
+		assert.equal(readFileSync(join(contributorRoot, "mixed", "unselected.txt"), "utf8"), "unselected\n");
+	}
+});
+
+for (const descendant of [true, false]) test(`committed-only selection rejects HEAD ${descendant ? "ancestor" : "subtree"} conflicts`, (t) => {
+	const contributorRoot = repository(t);
+	const baseRef = git(contributorRoot, "rev-parse", "HEAD");
+	const providerBaseTree = git(contributorRoot, "rev-parse", "HEAD^{tree}");
+	const committedPath = descendant ? "clash" : "clash/kept.txt";
+	if (!descendant) mkdirSync(join(contributorRoot, "clash"));
+	writeFileSync(join(contributorRoot, committedPath), "HEAD path\n");
+	git(contributorRoot, "add", "clash");
+	git(contributorRoot, "-c", "user.name=Candidate Test", "-c", "user.email=candidate@example.invalid", "commit", "-m", "HEAD path");
+	git(contributorRoot, "rm", "--cached", "-r", "-f", "clash");
+	rmSync(join(contributorRoot, "clash"), { recursive: true });
+	if (descendant) mkdirSync(join(contributorRoot, "clash"));
+	const selected = descendant ? "clash/selected.txt" : "clash";
+	writeFileSync(join(contributorRoot, selected), "selected\n");
+	if (descendant) writeFileSync(join(contributorRoot, "clash/unselected.txt"), "unselected\n");
+	const state = () => [
+		git(contributorRoot, "rev-parse", "HEAD"), git(contributorRoot, "show-ref"),
+		readFileSync(join(contributorRoot, ".git/index")).toString("hex"),
+		git(contributorRoot, "diff", "--cached", "--binary"), git(contributorRoot, "diff", "--binary"),
+		git(contributorRoot, "status", "--porcelain=v1", "--untracked-files=all"),
+		git(contributorRoot, "worktree", "list", "--porcelain"),
+	];
+	const before = state();
+	for (const base of [{ baseRef: "HEAD" }, { baseRef }, { providerBaseTree }]) {
+		let view: ReturnType<typeof createCandidateView> | undefined;
+		try {
+			assert.throws(() => { view = createCandidateView({ contributorRoot, ...base, committedOnly: true, intendedUntracked: [selected] }); }, (error: unknown) => error instanceof CandidateViewError && error.message === "candidate intended-untracked selection is invalid");
+		} finally { view?.cleanup(); }
+		assert.deepEqual(state(), before);
+		assert.equal(readFileSync(join(contributorRoot, selected), "utf8"), "selected\n");
+		if (descendant) assert.equal(readFileSync(join(contributorRoot, "clash/unselected.txt"), "utf8"), "unselected\n");
+	}
+});
+
 test("explicit base refs reject ambiguous DWIM names even when they resolve identically, while full refs stay valid", (t) => {
 	const contributorRoot = repository(t);
 	const baseCommit = git(contributorRoot, "rev-parse", "HEAD");
